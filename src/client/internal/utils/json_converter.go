@@ -1,7 +1,7 @@
 package utils
 
 import (
-	"client/internal/model"
+	"chat/client/internal/model"
 	"encoding/json"
 )
 

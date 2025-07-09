@@ -1,10 +1,12 @@
 package main
 
-import "server/internal/transport"
+import (
+	"chat/server/internal/transport/tcp"
+	"chat/server/internal/app"
+)
 
 func main() {
-	transport := transport.NewTransport()
-	transport.Listen()
-
-
+	transport := tcp.NewTCPTransport()
+	server := app.NewChatServer(transport)
+	server.Start()
 }

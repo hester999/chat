@@ -1,28 +1,37 @@
 package app
 
-// import "chat/internal/transport"
+import (
+	"chat/server/internal/transport"
+)
 
-// type ChatServer interface {
-// 	Start() error
-// 	Stop() error
-// 	Broadcast(msg string, from string)
-// }
+// ChatServer реализует бизнес-логику чата
+// и работает с Transport через интерфейс
 
-// // Реализация методов Start, Stop, Broadcast будет позже
+type ChatServer struct {
+	transport transport.Transport
+	quit      chan struct{}
+}
 
-// type Transport interface {
-// 	// Запуск прослушивания порта/сервера (обычно в отдельной горутине)
-// 	Listen() error
+func NewChatServer(tr transport.Transport) *ChatServer {
+	return &ChatServer{
+		transport: tr,
+		quit:      make(chan struct{}),
+	}
+}
 
-// 	// Канал, из которого ChatServer будет читать входящие сообщения от клиентов
-// 	MessageChannel() <-chan IncomingMessage
+// Start запускает сервер и слушает входящие сообщения
+func (s *ChatServer) Start() error {
+	err := s.transport.Start()
+	if err != nil {
+		return err
+	}
+	// Здесь можно реализовать отдельную обработку сообщений, если transport предоставляет канал
+	// Например, если transport реализует MessageChannel(), можно слушать его здесь
+	return nil
+}
 
-// 	// Разослать сообщение всем клиентам (broadcast)
-// 	BroadcastMessage(msg IncomingMessage) error
-
-// 	// Отправить сообщение конкретному клиенту (по адресу)
-// 	SendMessage(msg string, toAddr string) error
-
-// 	// Завершить работу транспорта, закрыть соединения
-// 	Close() error
-// }
+// Stop завершает работу сервера
+func (s *ChatServer) Stop() error {
+	close(s.quit)
+	return s.transport.Stop()
+}

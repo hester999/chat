@@ -1,7 +1,7 @@
 package main
 
 import (
-	"client/internal/app"
+	"chat/client/internal/app"
 	"fmt"
 	"net"
 	"os"

@@ -2,8 +2,9 @@ package app
 
 import (
 	"bufio"
-	"client/internal/model"
-	"client/internal/utils"
+	"chat/client/internal/model"
+	"chat/client/internal/utils"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -27,6 +28,14 @@ func (cl *Client) ConnectToChat() {
 	scanner.Scan()
 	username := scanner.Text()
 
+	// Этап регистрации
+	regMsg := struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}{"register", username}
+	data, _ := json.Marshal(regMsg)
+	cl.conn.Write(append(data, '\n'))
+
 	// Горутина для чтения всех сообщений от сервера
 	go func() {
 		serverReader := bufio.NewReader(cl.conn)
@@ -38,7 +47,11 @@ func (cl *Client) ConnectToChat() {
 			}
 			msgStruct := model.OutgoingMessage{}
 			err = utils.JsonToStruct(msg, &msgStruct)
-			cl.Print(msgStruct)
+			if err == nil {
+				cl.Print(msgStruct)
+			} else {
+				fmt.Print(msg) // fallback: если не JSON, просто выводим
+			}
 			fmt.Print("enter message\n")
 		}
 	}()
@@ -57,10 +70,27 @@ func (cl *Client) ConnectToChat() {
 
 func (cl *Client) Print(msg model.OutgoingMessage) {
 	const (
-		ColorReset = "\033[0m"
-		ColorGreen = "\033[32m"
-		ColorBlue  = "\033[34m"
+		ColorReset   = "\033[0m"
+		ColorGreen   = "\033[32m"
+		ColorBlue    = "\033[34m"
+		ColorMagenta = "\033[35m"
 	)
 
-	fmt.Printf("%s[%s]%s %s%s: %s%s\n", ColorBlue, msg.Time, ColorReset, ColorGreen, msg.Name, ColorReset, msg.Text)
+	timeStr := fmt.Sprintf("%s[%s]%s", ColorBlue, msg.Time, ColorReset)
+	nameStr := fmt.Sprintf("%s%s%s", ColorGreen, msg.Name, ColorReset)
+
+	if msg.Private {
+		fmt.Printf("%s[whisper]%s %s %s: %s\n",
+			ColorMagenta, ColorReset,
+			timeStr,
+			nameStr,
+			msg.Text,
+		)
+	} else {
+		fmt.Printf("%s %s: %s\n",
+			timeStr,
+			nameStr,
+			msg.Text,
+		)
+	}
 }

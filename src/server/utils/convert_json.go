@@ -3,7 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"server/internal/model"
+	"chat/server/internal/model"
 )
 
 func JsonToStruct(text string, obj interface{}) error {
