@@ -3,6 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"server/internal/model"
 )
 
 func JsonToStruct(text string, obj interface{}) error {
@@ -12,4 +13,9 @@ func JsonToStruct(text string, obj interface{}) error {
 		return err
 	}
 	return nil
+}
+
+func ClientMessageToJsonStr(data model.OutgoingMessage) []byte {
+	str, _ := json.Marshal(data)
+	return str
 }

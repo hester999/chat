@@ -8,7 +8,6 @@ import (
 
 	"net"
 	"strings"
-	"time"
 )
 
 type Transport interface {
@@ -77,23 +76,35 @@ func (t *TransportIMPL) handleRequest(conn net.Conn) {
 	t.clients[addr] = conn
 
 	scanner := bufio.NewScanner(conn)
-	//Сначала ждём имя пользователя
-	var username string
-	if scanner.Scan() {
-		username = scanner.Text()
-		t.clientsByName[username] = conn
-	}
 	for scanner.Scan() {
 		clientMessage := scanner.Text()
-		msg := model.IncomingMessage{From: username, Text: clientMessage}
-		if strings.HasPrefix(clientMessage, "/w ") {
+		var outMsg struct {
+			Name string `json:"name"`
+			Text string `json:"text"`
+			Time string `json:"time"`
+		}
+		err := utils.JsonToStruct(clientMessage, &outMsg)
+		if err != nil {
+			continue // или логировать ошибку
+		}
+		t.clientsByName[outMsg.Name] = conn // обновляем map на всякий случай
+
+		msg := model.IncomingMessage{From: outMsg.Name, Text: clientMessage}
+		if strings.HasPrefix(outMsg.Text, "/w ") {
+
 			t.privateChan <- msg
 		} else {
 			t.publicChan <- msg
 		}
 	}
 	delete(t.clients, addr)
-	delete(t.clientsByName, username)
+
+	for name, c := range t.clientsByName {
+		if c == conn {
+			delete(t.clientsByName, name)
+			break
+		}
+	}
 }
 
 func (t *TransportIMPL) SendMessage(msg string, toAddr string) error {
@@ -128,18 +139,35 @@ func (t *TransportIMPL) BroadcastMessage(msg model.IncomingMessage) error {
 }
 
 func (t *TransportIMPL) SendPrivateMessage(msg model.IncomingMessage) error {
-	parts := strings.SplitN(msg.Text, " ", 3)
+	// Парсим исходный JSON, чтобы получить имя, время и т.д.
+	var outMsg struct {
+		Name string `json:"name"`
+		Text string `json:"text"`
+		Time string `json:"time"`
+	}
+	err := utils.JsonToStruct(msg.Text, &outMsg)
+	if err != nil {
+		return fmt.Errorf("не удалось распарсить JSON приватного сообщения: %v", err)
+	}
+	parts := strings.SplitN(outMsg.Text, " ", 3)
 	if len(parts) < 3 {
 		return fmt.Errorf("неправильный формат whisper")
 	}
 	toName := parts[1]
 	whisperText := parts[2]
-	privateMsg := fmt.Sprintf("[whisper][%s] %s: %s\n", time.Now().Format("15:04:05"), msg.From, whisperText)
-	if toConn, ok := t.clientsByName[toName]; ok {
-		toConn.Write([]byte(privateMsg))
+	// Формируем JSON для приватного сообщения
+	privateMsg := model.OutgoingMessage{
+		Name: outMsg.Name,
+		Text: "[whisper] " + whisperText,
+		Time: outMsg.Time,
 	}
-	if fromConn, ok := t.clientsByName[msg.From]; ok {
-		fromConn.Write([]byte(privateMsg))
+	jsonMsg := utils.ClientMessageToJsonStr(privateMsg)
+	jsonMsg = append(jsonMsg, '\n')
+	if toConn, ok := t.clientsByName[toName]; ok {
+		toConn.Write(jsonMsg)
+	}
+	if fromConn, ok := t.clientsByName[outMsg.Name]; ok {
+		fromConn.Write(jsonMsg)
 	}
 	return nil
 }
