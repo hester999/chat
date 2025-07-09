@@ -2,12 +2,13 @@ package transport
 
 import (
 	"bufio"
-	"sync"
-
 	"fmt"
 	"server/internal/model"
+	"server/utils"
 
 	"net"
+	"strings"
+	"time"
 )
 
 type Transport interface {
@@ -28,15 +29,18 @@ type Transport interface {
 }
 
 type TransportIMPL struct {
-	clients  map[string]net.Conn
-	messages chan model.IncomingMessage
-	mu       sync.Mutex
+	clients       map[string]net.Conn
+	clientsByName map[string]net.Conn // имя -> соединение
+	publicChan    chan model.IncomingMessage
+	privateChan   chan model.IncomingMessage
 }
 
 func NewTransport() *TransportIMPL {
 	return &TransportIMPL{
-		clients:  make(map[string]net.Conn),
-		messages: make(chan model.IncomingMessage, 100),
+		clients:       make(map[string]net.Conn),
+		clientsByName: make(map[string]net.Conn),
+		publicChan:    make(chan model.IncomingMessage, 100),
+		privateChan:   make(chan model.IncomingMessage, 100),
 	}
 }
 
@@ -47,10 +51,14 @@ func (t *TransportIMPL) Listen() error {
 	}
 	defer listener.Close()
 
-	// Запускаем одну горутину для рассылки сообщений всем клиентам
 	go func() {
-		for msg := range t.messages {
-			t.BroadcastMessage(msg)
+		for {
+			select {
+			case msg := <-t.publicChan:
+				t.BroadcastMessage(msg)
+			case msg := <-t.privateChan:
+				t.SendPrivateMessage(msg)
+			}
 		}
 	}()
 
@@ -66,17 +74,26 @@ func (t *TransportIMPL) Listen() error {
 func (t *TransportIMPL) handleRequest(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
-	t.mu.Lock()
 	t.clients[addr] = conn
-	t.mu.Unlock()
+
 	scanner := bufio.NewScanner(conn)
+	//Сначала ждём имя пользователя
+	var username string
+	if scanner.Scan() {
+		username = scanner.Text()
+		t.clientsByName[username] = conn
+	}
 	for scanner.Scan() {
 		clientMessage := scanner.Text()
-		t.messages <- model.IncomingMessage{From: addr, Text: clientMessage}
+		msg := model.IncomingMessage{From: username, Text: clientMessage}
+		if strings.HasPrefix(clientMessage, "/w ") {
+			t.privateChan <- msg
+		} else {
+			t.publicChan <- msg
+		}
 	}
-	t.mu.Lock()
 	delete(t.clients, addr)
-	t.mu.Unlock()
+	delete(t.clientsByName, username)
 }
 
 func (t *TransportIMPL) SendMessage(msg string, toAddr string) error {
@@ -90,34 +107,59 @@ func (t *TransportIMPL) SendMessage(msg string, toAddr string) error {
 
 func (t *TransportIMPL) BroadcastMessage(msg model.IncomingMessage) error {
 	var err error
+	outgoingMessage := struct {
+		Name string `json:"name"`
+		Text string `json:"text"`
+		Time string `json:"time"`
+	}{}
+	err = utils.JsonToStruct(msg.Text, &outgoingMessage)
+	if err != nil {
+		err = fmt.Errorf("send message error")
+	}
+	//message := fmt.Sprintf("[%s] %s: %s\n", outgoingMessage.Time, outgoingMessage.Name, outgoingMessage.Text)
 	message := msg.Text + "\n"
-	for addr, client := range t.clients {
+	for _, client := range t.clientsByName {
 		_, err = client.Write([]byte(message))
 		if err != nil {
-			err = fmt.Errorf("send message for client:%s error:%s", addr, err)
+			err = fmt.Errorf("send message for client error: %s", err)
 		}
 	}
 	return err
 }
 
+func (t *TransportIMPL) SendPrivateMessage(msg model.IncomingMessage) error {
+	parts := strings.SplitN(msg.Text, " ", 3)
+	if len(parts) < 3 {
+		return fmt.Errorf("неправильный формат whisper")
+	}
+	toName := parts[1]
+	whisperText := parts[2]
+	privateMsg := fmt.Sprintf("[whisper][%s] %s: %s\n", time.Now().Format("15:04:05"), msg.From, whisperText)
+	if toConn, ok := t.clientsByName[toName]; ok {
+		toConn.Write([]byte(privateMsg))
+	}
+	if fromConn, ok := t.clientsByName[msg.From]; ok {
+		fromConn.Write([]byte(privateMsg))
+	}
+	return nil
+}
+
 func (t *TransportIMPL) MessageChannel() <-chan model.IncomingMessage {
-	return t.messages
+	return t.publicChan
 }
 
 func (t *TransportIMPL) Close() error {
 	// Закрыть все клиентские соединения
-	t.mu.Lock()
 	for addr, conn := range t.clients {
 		conn.Close()
 		delete(t.clients, addr)
 	}
-	t.mu.Unlock()
-
-	// Закрыть канал сообщений (если нужно завершить горутину рассылки)
-	close(t.messages)
-
-	// (Если listener хранится в структуре — закрыть его)
-	// t.listener.Close()
-
+	for name, conn := range t.clientsByName {
+		conn.Close()
+		delete(t.clientsByName, name)
+	}
+	// Закрыть каналы сообщений
+	close(t.publicChan)
+	close(t.privateChan)
 	return nil
 }
