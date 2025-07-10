@@ -2,19 +2,17 @@ package tcp
 
 import (
 	"bufio"
+	"chat/server/internal/model"
 	"fmt"
 	"net"
-	"chat/server/internal/model"
-	
+
 	"chat/server/utils"
 	"strings"
 )
 
-
-
 type TCPTransport struct {
 	clients       map[string]net.Conn
-	clientsByName map[string]net.Conn // имя -> соединение
+	clientsByName map[string]net.Conn // Имя -> соединение
 	publicChan    chan model.IncomingMessage
 	privateChan   chan model.IncomingMessage
 	quit          chan struct{}
