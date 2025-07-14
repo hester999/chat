@@ -1,8 +1,8 @@
 package main
 
 import (
-	"chat/server/internal/transport/tcp"
 	"chat/server/internal/app"
+	"chat/server/internal/transport/tcp"
 )
 
 func main() {

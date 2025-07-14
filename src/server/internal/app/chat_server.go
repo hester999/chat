@@ -1,18 +1,22 @@
 package app
 
 import (
-	"chat/server/internal/transport"
+	"chat/server/internal/model"
 )
 
-// ChatServer реализует бизнес-логику чата
-// и работает с Transport через интерфейс
+type Transport interface {
+	Start() error
+	Stop() error
+	BroadcastMessage(msg model.IncomingMessage) error
+	SendPrivateMessage(msg model.IncomingMessage) error
+}
 
 type ChatServer struct {
-	transport transport.Transport
+	transport Transport
 	quit      chan struct{}
 }
 
-func NewChatServer(tr transport.Transport) *ChatServer {
+func NewChatServer(tr Transport) *ChatServer {
 	return &ChatServer{
 		transport: tr,
 		quit:      make(chan struct{}),

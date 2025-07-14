@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sync"
 
 	"chat/server/utils"
 	"strings"
@@ -17,6 +18,7 @@ type TCPTransport struct {
 	publicChan    chan model.IncomingMessage
 	privateChan   chan model.IncomingMessage
 	quit          chan struct{}
+	mu            sync.RWMutex
 }
 
 func NewTCPTransport() *TCPTransport {
@@ -61,7 +63,9 @@ func (t *TCPTransport) Start() error {
 func (t *TCPTransport) handleRequest(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
+	t.mu.Lock()
 	t.clients[addr] = conn
+	t.mu.Unlock()
 
 	scanner := bufio.NewScanner(conn)
 	var username string
@@ -88,7 +92,9 @@ func (t *TCPTransport) handleRequest(conn net.Conn) {
 		if msgDTO.Type == "register" {
 			if msgDTO.Name != "" && username == "" {
 				username = msgDTO.Name
+				t.mu.Lock()
 				t.clientsByName[username] = conn
+				t.mu.Unlock()
 				fmt.Printf("User %s registered from %s\n", username, addr)
 			}
 			continue
@@ -98,20 +104,24 @@ func (t *TCPTransport) handleRequest(conn net.Conn) {
 		if strings.HasPrefix(msgDTO.Text, "/w ") {
 			t.privateChan <- incomingMsg
 		} else if utils.IsExitCommand(msgDTO.Text) {
+			t.mu.Lock()
 			delete(t.clients, addr)
 			if username != "" {
 				delete(t.clientsByName, username)
 			}
+			t.mu.Unlock()
 			return
 		} else {
 			t.publicChan <- incomingMsg
 		}
 	}
 
+	t.mu.Lock()
 	delete(t.clients, addr)
 	if username != "" {
 		delete(t.clientsByName, username)
 	}
+	t.mu.Unlock()
 }
 
 func (t *TCPTransport) BroadcastMessage(msg model.IncomingMessage) error {
@@ -155,12 +165,14 @@ func (t *TCPTransport) BroadcastMessage(msg model.IncomingMessage) error {
 	}
 
 	message := string(responseJSON) + "\n"
+	t.mu.RLock()
 	for _, client := range t.clientsByName {
 		_, err = client.Write([]byte(message))
 		if err != nil {
 			return fmt.Errorf("send message for client error: %s", err)
 		}
 	}
+	t.mu.RUnlock()
 	return nil
 }
 
@@ -216,20 +228,25 @@ func (t *TCPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
 	message := string(responseJSON) + "\n"
 
 	// Отправляем получателю
+	t.mu.RLock()
 	if toConn, ok := t.clientsByName[toName]; ok {
 		toConn.Write([]byte(message))
 	}
+	t.mu.RUnlock()
 
 	// Отправляем отправителю (подтверждение)
+	t.mu.RLock()
 	if fromConn, ok := t.clientsByName[msgDTO.Name]; ok {
 		fromConn.Write([]byte(message))
 	}
+	t.mu.RUnlock()
 
 	return nil
 }
 
 func (t *TCPTransport) Stop() error {
 	close(t.quit)
+	t.mu.Lock()
 	for addr, conn := range t.clients {
 		conn.Close()
 		delete(t.clients, addr)
@@ -238,6 +255,7 @@ func (t *TCPTransport) Stop() error {
 		conn.Close()
 		delete(t.clientsByName, name)
 	}
+	t.mu.Unlock()
 	close(t.publicChan)
 	close(t.privateChan)
 	return nil

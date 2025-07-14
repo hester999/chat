@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,7 @@ type UDPTransport struct {
 	privateChan   chan model.IncomingMessage
 	quit          chan struct{}
 	conn          *net.UDPConn
+	mu            sync.RWMutex // Мьютекс для защиты доступа к clients и clientsByName
 }
 
 func NewUDPTransport() *UDPTransport {
@@ -37,11 +39,12 @@ func NewUDPTransport() *UDPTransport {
 
 // Очистка неактивных клиентов
 func (u *UDPTransport) cleanupInactiveClients(timeout time.Duration) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(120 * time.Second)
 	for {
 		select {
 		case <-ticker.C:
 			now := time.Now()
+			u.mu.Lock()
 			for ip, client := range u.clients {
 				if now.Sub(client.LastSeen) > timeout {
 					fmt.Printf("Remove inactive client: %s (%s)\n", client.Name, ip)
@@ -51,6 +54,7 @@ func (u *UDPTransport) cleanupInactiveClients(timeout time.Duration) {
 					}
 				}
 			}
+			u.mu.Unlock()
 		case <-u.quit:
 			ticker.Stop()
 			return
@@ -93,11 +97,13 @@ func (u *UDPTransport) Start() error {
 func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
 	// Обновляем или создаём ClientInfo
+	u.mu.Lock()
 	if client, ok := u.clients[ip]; ok {
 		client.LastSeen = time.Now()
 	} else {
 		u.clients[ip] = &ClientInfo{Addr: addr, LastSeen: time.Now()}
 	}
+	u.mu.Unlock()
 	strBuf := string(buf)
 
 	var msgDTO struct {
@@ -117,14 +123,17 @@ func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	if msgDTO.Type == "register" {
 		if msgDTO.Name != "" {
 			// Проверяем, не занято ли имя другим адресом
+			u.mu.Lock()
 			if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
 				if existingAddr.String() != addr.String() {
+					u.mu.Unlock()
 					fmt.Printf("Name %s already taken by %s\n", msgDTO.Name, existingAddr.String())
 					return
 				}
 			}
 			u.clientsByName[msgDTO.Name] = addr
 			u.clients[ip].Name = msgDTO.Name
+			u.mu.Unlock()
 			fmt.Printf("User %s registered from %s\n", msgDTO.Name, addr.String())
 		}
 		return
@@ -137,17 +146,21 @@ func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	}
 
 	// Проверяем, что пользователь зарегистрирован
+	u.mu.RLock()
 	if _, ok := u.clientsByName[msgDTO.Name]; !ok {
+		u.mu.RUnlock()
 		fmt.Printf("User %s not registered\n", msgDTO.Name)
 		return
 	}
 
 	if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
 		if existingAddr.String() != addr.String() {
+			u.mu.RUnlock()
 			fmt.Printf("Message from wrong address for user %s\n", msgDTO.Name)
 			return
 		}
 	}
+	u.mu.RUnlock()
 
 	incomingMsg := model.IncomingMessage{From: msgDTO.Name, Text: strBuf}
 	if strings.HasPrefix(msgDTO.Text, "/w ") {
@@ -155,6 +168,7 @@ func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	} else if utils.IsExitCommand(msgDTO.Text) {
 		ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
 		var username string
+		u.mu.Lock()
 		if client, ok := u.clients[ip]; ok {
 			username = client.Name
 		}
@@ -164,6 +178,7 @@ func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 		if username != "" {
 			delete(u.clientsByName, username)
 		}
+		u.mu.Unlock()
 		fmt.Printf("User %s (%s) disconnected\n", username, ip)
 		return
 	} else {
@@ -210,11 +225,30 @@ func (u *UDPTransport) BroadcastMessage(msg model.IncomingMessage) error {
 
 	responseJSON = append(responseJSON, '\n')
 
+	u.mu.RLock()
 	for _, client := range u.clients {
 		if _, err = u.conn.WriteTo(responseJSON, client.Addr); err != nil {
 			fmt.Errorf("send message for clients error: %s", err)
 			continue
 		}
+	}
+	u.mu.RUnlock()
+	return nil
+}
+
+func (u *UDPTransport) Stop() error {
+	close(u.quit)
+	u.mu.Lock()
+	for ip, client := range u.clients {
+		fmt.Printf("Disconnecting client: %s (%s)\n", client.Name, ip)
+	}
+	u.clients = make(map[string]*ClientInfo)
+	u.clientsByName = make(map[string]*net.UDPAddr)
+	u.mu.Unlock()
+	close(u.publicChan)
+	close(u.privateChan)
+	if u.conn != nil {
+		u.conn.Close()
 	}
 	return nil
 }
@@ -270,19 +304,21 @@ func (u *UDPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
 
 	responseJSON = append(responseJSON, '\n')
 
+	u.mu.RLock()
 	for _, v := range u.clients {
 		if v.Name == toName {
 			if _, err = u.conn.WriteTo(responseJSON, v.Addr); err != nil {
+				u.mu.RUnlock()
 				return fmt.Errorf("send message for clients error: %s", err)
 			}
 			break
 		}
 	}
 
-	// Отправляем отправителю (подтверждение)
 	if fromConn, ok := u.clientsByName[msgDTO.Name]; ok {
 		u.conn.WriteTo(responseJSON, fromConn)
 	}
+	u.mu.RUnlock()
 
 	return nil
 }
