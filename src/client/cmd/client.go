@@ -1,35 +1,14 @@
 package main
 
 import (
-	"chat/client/internal/app"
-	"fmt"
-	"net"
-	"os"
+	"chat/client/internal/cfg"
+	"log"
 )
 
-//	func main() {
-//		conn, err := net.Dial("tcp", "localhost:4545")
-//		if err != nil {
-//			fmt.Println("Error connecting:", err.Error())
-//			os.Exit(1)
-//		}
-//		defer conn.Close()
-//
-//		client := app.NewClient(conn)
-//
-//		client.ConnectToChat()
-//
-// }
 func main() {
-	conn, err := net.Dial("udp", "localhost:4545")
+	appInstance, err := cfg.Setup()
 	if err != nil {
-		fmt.Println("Error connecting:", err.Error())
-		os.Exit(1)
+		log.Fatal("Setup error:", err)
 	}
-	defer conn.Close()
-
-	client := app.NewClient(conn)
-
-	client.ConnectToChat()
-
+	appInstance.ConnectToChat()
 }

@@ -3,87 +3,286 @@ package udp
 import (
 	"chat/server/internal/model"
 	"chat/server/utils"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
+type ClientInfo struct {
+	Addr     *net.UDPAddr
+	Name     string
+	LastSeen time.Time
+}
+
 type UDPTransport struct {
-	clients       map[string]*net.UDPAddr
-	clientsByName map[string]*net.UDPAddr // Имя -> соединение2
+	clients       map[string]*ClientInfo  // ip:port -> ClientInfo
+	clientsByName map[string]*net.UDPAddr // имя -> адрес
 	publicChan    chan model.IncomingMessage
 	privateChan   chan model.IncomingMessage
 	quit          chan struct{}
-	buff          []byte
+	conn          *net.UDPConn
 }
 
-func NewTCPTransport() *UDPTransport {
+func NewUDPTransport() *UDPTransport {
 	return &UDPTransport{
-		clients:       make(map[string]*net.UDPAddr),
+		clients:       make(map[string]*ClientInfo),
 		clientsByName: make(map[string]*net.UDPAddr),
 		publicChan:    make(chan model.IncomingMessage, 100),
 		privateChan:   make(chan model.IncomingMessage, 100),
 		quit:          make(chan struct{}),
-		buff:          make([]byte, 4096),
+	}
+}
+
+// Очистка неактивных клиентов
+func (u *UDPTransport) cleanupInactiveClients(timeout time.Duration) {
+	ticker := time.NewTicker(30 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			for ip, client := range u.clients {
+				if now.Sub(client.LastSeen) > timeout {
+					fmt.Printf("Remove inactive client: %s (%s)\n", client.Name, ip)
+					delete(u.clients, ip)
+					if client.Name != "" {
+						delete(u.clientsByName, client.Name)
+					}
+				}
+			}
+		case <-u.quit:
+			ticker.Stop()
+			return
+		}
 	}
 }
 
 func (u *UDPTransport) Start() error {
 	addr, _ := net.ResolveUDPAddr("udp", ":4545")
 	conn, _ := net.ListenUDP("udp", addr)
+	u.conn = conn
 	defer conn.Close()
 
-	//go func() {
-	//	for {
-	//		select {
-	//		case msg := <-u.publicChan:
-	//			//u.BroadcastMessage(msg)
-	//		case msg := <-u.privateChan:
-	//			//u.SendPrivateMessage(msg)
-	//		case <-u.quit:
-	//			return
-	//		}
-	//	}
-	//}()
+	go u.cleanupInactiveClients(60 * time.Second)
 
+	go func() {
+		for {
+			select {
+			case msg := <-u.publicChan:
+				u.BroadcastMessage(msg)
+			case msg := <-u.privateChan:
+				u.SendPrivateMessage(msg)
+			case <-u.quit:
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, 4096)
 	for {
-		n, addr, err := conn.ReadFromUDP(u.buff)
+		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			fmt.Errorf("%s", err)
+			fmt.Printf("%s", err)
 			continue
 		}
-		go u.handleRequest(u.buff[:n], addr)
+		go u.handleRequest(buf[:n], addr)
 	}
 }
 
 func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
-	u.clients[ip] = addr
+	// Обновляем или создаём ClientInfo
+	if client, ok := u.clients[ip]; ok {
+		client.LastSeen = time.Now()
+	} else {
+		u.clients[ip] = &ClientInfo{Addr: addr, LastSeen: time.Now()}
+	}
 	strBuf := string(buf)
-	var outMsg struct {
+
+	var msgDTO struct {
+		Type    string `json:"type,omitempty"`
+		Name    string `json:"name"`
+		Text    string `json:"text,omitempty"`
+		Time    string `json:"time,omitempty"`
+		Private bool   `json:"private,omitempty"`
+	}
+
+	err := utils.JsonToStruct(strBuf, &msgDTO)
+	if err != nil {
+		fmt.Printf("Error parsing JSON: %s\n", err)
+		return
+	}
+
+	if msgDTO.Type == "register" {
+		if msgDTO.Name != "" {
+			// Проверяем, не занято ли имя другим адресом
+			if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+				if existingAddr.String() != addr.String() {
+					fmt.Printf("Name %s already taken by %s\n", msgDTO.Name, existingAddr.String())
+					return
+				}
+			}
+			u.clientsByName[msgDTO.Name] = addr
+			u.clients[ip].Name = msgDTO.Name
+			fmt.Printf("User %s registered from %s\n", msgDTO.Name, addr.String())
+		}
+		return
+	}
+
+	// Обработка обычных сообщений (только для зарегистрированных пользователей)
+	if msgDTO.Name == "" {
+		fmt.Printf("Message from unregistered user %s\n", addr.String())
+		return
+	}
+
+	// Проверяем, что пользователь зарегистрирован
+	if _, ok := u.clientsByName[msgDTO.Name]; !ok {
+		fmt.Printf("User %s not registered\n", msgDTO.Name)
+		return
+	}
+
+	if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+		if existingAddr.String() != addr.String() {
+			fmt.Printf("Message from wrong address for user %s\n", msgDTO.Name)
+			return
+		}
+	}
+
+	incomingMsg := model.IncomingMessage{From: msgDTO.Name, Text: strBuf}
+	if strings.HasPrefix(msgDTO.Text, "/w ") {
+		u.privateChan <- incomingMsg
+	} else if utils.IsExitCommand(msgDTO.Text) {
+		ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
+		var username string
+		if client, ok := u.clients[ip]; ok {
+			username = client.Name
+		}
+
+		delete(u.clients, ip)
+
+		if username != "" {
+			delete(u.clientsByName, username)
+		}
+		fmt.Printf("User %s (%s) disconnected\n", username, ip)
+		return
+	} else {
+		u.publicChan <- incomingMsg
+	}
+}
+
+func (u *UDPTransport) BroadcastMessage(msg model.IncomingMessage) error {
+
+	var msgDTO struct {
 		Name string `json:"name"`
 		Text string `json:"text"`
 		Time string `json:"time"`
 	}
 
-	var reg struct {
-		Type string `json:"type"`
+	err := utils.JsonToStruct(msg.Text, &msgDTO)
+	if err != nil {
+		return fmt.Errorf("send message error: %v", err)
+	}
+
+	outgoingMsg := model.OutgoingMessage{
+		Name:    msgDTO.Name,
+		Text:    msgDTO.Text,
+		Time:    msgDTO.Time,
+		Private: false,
+	}
+
+	var responseDTO struct {
+		Name    string `json:"name"`
+		Text    string `json:"text"`
+		Time    string `json:"time"`
+		Private bool   `json:"private,omitempty"`
+	}
+
+	responseDTO.Name = outgoingMsg.Name
+	responseDTO.Text = outgoingMsg.Text
+	responseDTO.Time = outgoingMsg.Time
+	responseDTO.Private = outgoingMsg.Private
+
+	responseJSON, err := json.Marshal(responseDTO)
+	if err != nil {
+		return fmt.Errorf("marshal response error: %v", err)
+	}
+
+	responseJSON = append(responseJSON, '\n')
+
+	for _, client := range u.clients {
+		if _, err = u.conn.WriteTo(responseJSON, client.Addr); err != nil {
+			fmt.Errorf("send message for clients error: %s", err)
+			continue
+		}
+	}
+	return nil
+}
+
+func (u *UDPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
+	// DTO для парсинга входящего сообщения
+	var msgDTO struct {
 		Name string `json:"name"`
+		Text string `json:"text"`
+		Time string `json:"time"`
 	}
 
-	if strings.Contains(strBuf, "register") {
-		err := utils.JsonToStruct(strBuf, &reg)
+	err := utils.JsonToStruct(msg.Text, &msgDTO)
+	if err != nil {
+		return fmt.Errorf("не удалось распарсить JSON приватного сообщения: %v", err)
+	}
 
-		if err != nil {
-			fmt.Errorf("%s", err)
-		}
-	} else if !strings.Contains(strBuf, "register") {
+	parts := strings.SplitN(msgDTO.Text, " ", 3)
+	if len(parts) < 3 {
+		return fmt.Errorf("неправильный формат whisper")
+	}
 
-		err := utils.JsonToStruct(strBuf, &outMsg)
-		if err != nil {
-			fmt.Errorf("%s", err)
+	toName := parts[1]
+	whisperText := parts[2]
+
+	// Создаём бизнес-модель
+	privateMsg := model.OutgoingMessage{
+		Name:    msgDTO.Name,
+		Text:    whisperText,
+		Time:    msgDTO.Time,
+		Private: true,
+	}
+
+	// DTO для отправки
+	var responseDTO struct {
+		Name    string `json:"name"`
+		Text    string `json:"text"`
+		Time    string `json:"time"`
+		Private bool   `json:"private,omitempty"`
+	}
+
+	// Конвертируем бизнес-модель в DTO
+	responseDTO.Name = privateMsg.Name
+	responseDTO.Text = privateMsg.Text
+	responseDTO.Time = privateMsg.Time
+	responseDTO.Private = privateMsg.Private
+
+	// Сериализуем
+	responseJSON, err := json.Marshal(responseDTO)
+	if err != nil {
+		return fmt.Errorf("marshal private message error: %v", err)
+	}
+
+	responseJSON = append(responseJSON, '\n')
+
+	for _, v := range u.clients {
+		if v.Name == toName {
+			if _, err = u.conn.WriteTo(responseJSON, v.Addr); err != nil {
+				return fmt.Errorf("send message for clients error: %s", err)
+			}
+			break
 		}
 	}
-	
-	fmt.Println(outMsg)
+
+	// Отправляем отправителю (подтверждение)
+	if fromConn, ok := u.clientsByName[msgDTO.Name]; ok {
+		u.conn.WriteTo(responseJSON, fromConn)
+	}
+
+	return nil
 }

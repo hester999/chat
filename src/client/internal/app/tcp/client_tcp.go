@@ -1,4 +1,4 @@
-package app
+package tcp
 
 import (
 	"bufio"
@@ -14,6 +14,7 @@ import (
 type Client struct {
 	conn     net.Conn
 	userData []byte
+	username string
 }
 
 func NewClient(connect net.Conn) *Client {
@@ -23,20 +24,8 @@ func NewClient(connect net.Conn) *Client {
 }
 
 func (cl *Client) ConnectToChat() {
-	fmt.Print("Enter your name: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	username := scanner.Text()
+	cl.registration()
 
-	// Этап регистрации
-	regMsg := struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}{"register", username}
-	data, _ := json.Marshal(regMsg)
-	cl.conn.Write(append(data, '\n'))
-
-	// Горутина для чтения всех сообщений от сервера
 	go func() {
 		serverReader := bufio.NewReader(cl.conn)
 		for {
@@ -48,7 +37,7 @@ func (cl *Client) ConnectToChat() {
 			msgStruct := model.OutgoingMessage{}
 			err = utils.JsonToStruct(msg, &msgStruct)
 			if err == nil {
-				cl.Print(msgStruct)
+				cl.print(msgStruct)
 			} else {
 				fmt.Print(msg) // fallback: если не JSON, просто выводим
 			}
@@ -56,19 +45,12 @@ func (cl *Client) ConnectToChat() {
 		}
 	}()
 
-	// Основной поток — отправка сообщений
-	consoleScanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("Enter text to send:")
-	for consoleScanner.Scan() {
-		text := consoleScanner.Text()
-		msg := model.OutgoingMessage{Name: username, Text: text, Time: time.Now().Format("2006/01/02 15:04:05")}
-		message := utils.ClientMessageToJsonStr(msg)
-		cl.conn.Write(append(message, '\n'))
-	}
+	go cl.SendMessage()
 
+	select {}
 }
 
-func (cl *Client) Print(msg model.OutgoingMessage) {
+func (cl *Client) print(msg model.OutgoingMessage) {
 	const (
 		ColorReset   = "\033[0m"
 		ColorGreen   = "\033[32m"
@@ -93,4 +75,29 @@ func (cl *Client) Print(msg model.OutgoingMessage) {
 			msg.Text,
 		)
 	}
+}
+
+func (cl *Client) SendMessage() {
+	consoleScanner := bufio.NewScanner(os.Stdin)
+	fmt.Println("Enter text to send:")
+	for consoleScanner.Scan() {
+		text := consoleScanner.Text()
+		msg := model.OutgoingMessage{Name: cl.username, Text: text, Time: time.Now().Format("2006/01/02 15:04:05")}
+		message := utils.ClientMessageToJsonStr(msg)
+		cl.conn.Write(append(message, '\n'))
+	}
+}
+
+func (cl *Client) registration() {
+	fmt.Print("Enter your name: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	cl.username = scanner.Text()
+
+	regMsg := struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}{"register", cl.username}
+	data, _ := json.Marshal(regMsg)
+	cl.conn.Write(append(data, '\n'))
 }

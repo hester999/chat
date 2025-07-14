@@ -19,14 +19,12 @@ func NewChatServer(tr transport.Transport) *ChatServer {
 	}
 }
 
-// Start запускает сервер и слушает входящие сообщения
 func (s *ChatServer) Start() error {
 	err := s.transport.Start()
 	if err != nil {
 		return err
 	}
-	// Здесь можно реализовать отдельную обработку сообщений, если transport предоставляет канал
-	// Например, если transport реализует MessageChannel(), можно слушать его здесь
+
 	return nil
 }
 
