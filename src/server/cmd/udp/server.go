@@ -1,12 +1,11 @@
 package main
 
-import "chat/server/internal/transport/udp"
+import (
+	"chat/server/internal/transport/udp"
+)
 
 func main() {
-	t := udp.NewTCPTransport()
-	err := t.Start()
-	if err != nil {
-		return
-	}
-
+	transport := udp.NewUDPTransport()
+	transport.Start()
+	
 }
