@@ -1,28 +1,48 @@
 package app
 
-// import "chat/internal/transport"
+import (
+	"chat/server/internal/model"
+)
 
-// type ChatServer interface {
-// 	Start() error
-// 	Stop() error
-// 	Broadcast(msg string, from string)
-// }
+type Transport interface {
+	Start(address string) error
+	Stop() error
+	BroadcastMessage(msg model.IncomingMessage) error
+	SendPrivateMessage(msg model.IncomingMessage) error
+}
 
-// // Реализация методов Start, Stop, Broadcast будет позже
+type ChatServer struct {
+	transport  Transport
+	quit       chan struct{}
+	serverAddr string
+}
 
-// type Transport interface {
-// 	// Запуск прослушивания порта/сервера (обычно в отдельной горутине)
-// 	Listen() error
+func NewChatServer(tr Transport, addr string) *ChatServer {
+	return &ChatServer{
+		transport:  tr,
+		quit:       make(chan struct{}),
+		serverAddr: addr,
+	}
+}
 
-// 	// Канал, из которого ChatServer будет читать входящие сообщения от клиентов
-// 	MessageChannel() <-chan IncomingMessage
+func (s *ChatServer) Start() error {
+	err := s.transport.Start(s.serverAddr)
+	if err != nil {
+		return err
+	}
 
-// 	// Разослать сообщение всем клиентам (broadcast)
-// 	BroadcastMessage(msg IncomingMessage) error
+	return nil
+}
 
-// 	// Отправить сообщение конкретному клиенту (по адресу)
-// 	SendMessage(msg string, toAddr string) error
+func (s *ChatServer) Stop() error {
+	close(s.quit)
+	return s.transport.Stop()
+}
 
-// 	// Завершить работу транспорта, закрыть соединения
-// 	Close() error
-// }
+func (s *ChatServer) BroadcastMessage(msg model.IncomingMessage) error {
+	return s.transport.BroadcastMessage(msg)
+}
+
+func (s *ChatServer) SendPrivateMessage(msg model.IncomingMessage) error {
+	return s.transport.SendPrivateMessage(msg)
+}
