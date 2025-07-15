@@ -5,10 +5,11 @@ import (
 	"chat/server/internal/model"
 	"chat/server/utils"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"sync"
+
+	"github.com/gorilla/websocket"
 )
 
 type RawMessage struct {
@@ -156,7 +157,6 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case "register":
-			fmt.Println(123)
 			h.handleRegister(ws, &username, msg)
 		case "exit":
 			h.handleExit(ws, username)
@@ -164,7 +164,6 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 		case "whisper":
 			h.handleWhisper(msg)
 		case "broadcast":
-			fmt.Println(123)
 			h.handleBroadcast(msg)
 		}
 	}
@@ -172,7 +171,9 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	delete(h.clients, ws)
 	if username != "" {
-		delete(h.clientsByName, username)
+		if h.clientsByName[username] == ws {
+			delete(h.clientsByName, username)
+		}
 	}
 	h.mu.Unlock()
 }
@@ -180,7 +181,16 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 func (h *Transport) handleRegister(ws *websocket.Conn, username *string, msg dto.HTTPMessageDTO) {
 	*username = msg.Name
 	h.mu.Lock()
-
+	if _, ok := h.clientsByName[*username]; ok {
+		err := dto.HTTPMessageDTO{
+			Type: "error",
+			Text: "username already taken",
+		}
+		ws.WriteJSON(err)
+		h.mu.Unlock()
+		ws.Close()
+		return
+	}
 	h.clientsByName[*username] = ws
 	h.mu.Unlock()
 	fmt.Printf("User %s registered from %s\n", *username, ws.RemoteAddr())
@@ -190,7 +200,9 @@ func (h *Transport) handleExit(ws *websocket.Conn, username string) {
 	h.mu.Lock()
 	delete(h.clients, ws)
 	if username != "" {
+
 		delete(h.clientsByName, username)
+
 	}
 	h.mu.Unlock()
 }
@@ -207,11 +219,26 @@ func (h *Transport) handleBroadcast(msg dto.HTTPMessageDTO) {
 
 func (h *Transport) handleWhisper(msg dto.HTTPMessageDTO) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	if toConn, ok := h.clientsByName[msg.Dst]; ok {
+	toConn, ok := h.clientsByName[msg.Dst]
+	h.mu.RUnlock()
+	if !ok {
+		h.mu.RLock()
+		if fromConn, ok := h.clientsByName[msg.Name]; ok {
+			err := dto.ErrorDTO{
+				Type:    "error",
+				Message: "user not found",
+			}
+			fromConn.WriteJSON(err)
+		}
+		h.mu.RUnlock()
+		return
+	}
+	h.mu.RLock()
+	if toConn != nil {
 		toConn.WriteJSON(msg)
 	}
 	if fromConn, ok := h.clientsByName[msg.Name]; ok && msg.Dst != msg.Name {
 		fromConn.WriteJSON(msg)
 	}
+	h.mu.RUnlock()
 }

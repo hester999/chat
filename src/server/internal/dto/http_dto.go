@@ -7,3 +7,5 @@ type HTTPMessageDTO struct {
 	Time string `json:"time,omitempty"`
 	Dst  string `json:"dst,omitempty"`
 }
+
+

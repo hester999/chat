@@ -29,7 +29,6 @@ func (c *Client) ConnectToChat() {
 		for {
 			var msg dto.HTTPMessageDTO
 			err := c.ws.ReadJSON(&msg)
-			fmt.Println(msg)
 			if err != nil {
 				fmt.Println("Disconnected from server:", err)
 				os.Exit(0)
@@ -44,30 +43,44 @@ func (c *Client) ConnectToChat() {
 }
 
 func (c *Client) print(msg dto.HTTPMessageDTO) {
+	fmt.Println(msg)
 	const (
 		ColorReset   = "\033[0m"
 		ColorGreen   = "\033[32m"
 		ColorBlue    = "\033[34m"
 		ColorMagenta = "\033[35m"
+		ColorRed     = "\033[31m"
 	)
 
-	timeStr := fmt.Sprintf("%s[%s]%s", ColorBlue, msg.Time, ColorReset)
-	nameStr := fmt.Sprintf("%s%s%s", ColorGreen, msg.Name, ColorReset)
-
-	if msg.Type == "whisper" {
-		fmt.Printf("%s[whisper]%s %s %s: %s\n",
-			ColorMagenta, ColorReset,
-			timeStr,
-			nameStr,
-			msg.Text,
-		)
-	} else {
-		fmt.Printf("%s %s: %s\n",
-			timeStr,
-			nameStr,
-			msg.Text,
-		)
+	timeStr := ""
+	if msg.Time != "" {
+		timeStr = fmt.Sprintf("%s[%s]%s ", ColorBlue, msg.Time, ColorReset)
 	}
+	nameStr := ""
+	if msg.Name != "" {
+		nameStr = fmt.Sprintf("%s%s%s", ColorGreen, msg.Name, ColorReset)
+	}
+
+	switch msg.Type {
+	case "whisper":
+		fmt.Printf("%s%s[whisper]%s %s: %s\n",
+			timeStr,
+			ColorMagenta, ColorReset,
+			nameStr,
+			msg.Text,
+		)
+	case "broadcast":
+		fmt.Printf("%s%s: %s\n",
+			timeStr,
+			nameStr,
+			msg.Text,
+		)
+	case "error":
+		fmt.Printf("%s[error]%s %s\n", ColorRed, ColorReset, msg.Text)
+	default:
+		fmt.Println(msg.Text)
+	}
+	fmt.Print("Enter text to send:\n")
 }
 
 func (c *Client) SendMessage() {
@@ -92,7 +105,7 @@ func (c *Client) SendMessage() {
 			parts.Split(bufio.ScanWords)
 			if parts.Scan() {
 				dst := parts.Text()
-				whisperText := text[3+len(dst)+1:] // +1 для пробела
+				whisperText := text[3+len(dst)+1:]
 
 				whisperMsg := dto.HTTPMessageDTO{
 					Type: "whisper",
