@@ -18,3 +18,7 @@ func NewApp(c Client) *App {
 func (a *App) ConnectToChat() {
 	a.client.ConnectToChat()
 }
+
+func (a *App) SendMessage() {
+	a.client.SendMessage()
+}

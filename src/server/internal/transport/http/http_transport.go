@@ -42,7 +42,7 @@ func NewHTTPTransport() *Transport {
 	}
 }
 
-func (h *Transport) Start(addres string) error {
+func (h *Transport) Start(address string) error {
 	go func() {
 		for {
 			select {
@@ -57,8 +57,8 @@ func (h *Transport) Start(addres string) error {
 	}()
 
 	http.HandleFunc("/ws", h.handleConnections)
-	log.Println("http server started on ", addres)
-	err := http.ListenAndServe(addres, nil)
+	log.Println("http server started on ", address)
+	err := http.ListenAndServe(address, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
 	}
@@ -71,21 +71,19 @@ func (h *Transport) Stop() error {
 }
 
 func (h *Transport) BroadcastMessage(msg model.IncomingMessage) error {
-	// msg.Text содержит сериализованный JSON DTO
+
 	var dtoMsg dto.HTTPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &dtoMsg)
 	if err != nil {
 		return fmt.Errorf("send message error: %v", err)
 	}
 
-	// Преобразуем DTO в бизнес-модель
 	outgoingMsg := model.HTTPMessage{
 		Name: dtoMsg.Name,
 		Text: dtoMsg.Text,
 		Time: dtoMsg.Time,
 	}
 
-	// Преобразуем бизнес-модель обратно в DTO для отправки
 	responseDTO := dto.HTTPMessageDTO{
 		Name: outgoingMsg.Name,
 		Text: outgoingMsg.Text,
@@ -115,7 +113,6 @@ func (h *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
 		Name: dtoMsg.Name,
 		Text: dtoMsg.Text,
 		Time: dtoMsg.Time,
-		// Private: true, // больше не используется
 	}
 
 	responseDTO := dto.HTTPMessageDTO{
@@ -183,10 +180,7 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 func (h *Transport) handleRegister(ws *websocket.Conn, username *string, msg dto.HTTPMessageDTO) {
 	*username = msg.Name
 	h.mu.Lock()
-	//if _, ok := h.clients[ws]; ok {
-	//	h.mu.Unlock()
-	//	return
-	//}
+
 	h.clientsByName[*username] = ws
 	h.mu.Unlock()
 	fmt.Printf("User %s registered from %s\n", *username, ws.RemoteAddr())

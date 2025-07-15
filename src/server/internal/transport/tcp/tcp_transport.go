@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 
+	"chat/server/internal/dto"
 	"chat/server/utils"
 )
 
@@ -59,20 +60,6 @@ func (t *Transport) Start(address string) error {
 	}
 }
 
-// DTO для TCP (аналогично HTTP)
-type TCPMessageDTO struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-	Text string `json:"text,omitempty"`
-	Time string `json:"time,omitempty"`
-	Dst  string `json:"dst,omitempty"`
-}
-
-type ErrorDTO struct {
-	Type    string `json:"type"` // всегда "error"
-	Message string `json:"message"`
-}
-
 func (t *Transport) handleRequest(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
@@ -86,7 +73,7 @@ func (t *Transport) handleRequest(conn net.Conn) {
 	for scanner.Scan() {
 		clientMessage := scanner.Text()
 
-		var msgDTO TCPMessageDTO
+		var msgDTO dto.TCPMessageDTO
 		err := utils.JsonToStruct(clientMessage, &msgDTO)
 		if err != nil {
 			t.sendError(conn, "invalid json format")
@@ -140,7 +127,7 @@ func (t *Transport) handleRequest(conn net.Conn) {
 }
 
 func (t *Transport) sendError(conn net.Conn, message string) {
-	errDTO := ErrorDTO{
+	errDTO := dto.ErrorDTO{
 		Type:    "error",
 		Message: message,
 	}
@@ -149,7 +136,7 @@ func (t *Transport) sendError(conn net.Conn, message string) {
 }
 
 func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
-	var msgDTO TCPMessageDTO
+	var msgDTO dto.TCPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &msgDTO)
 	if err != nil {
 		if sender, ok := t.clientsByName[msg.From]; ok {
@@ -158,7 +145,7 @@ func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
 		return fmt.Errorf("send message error: %v", err)
 	}
 
-	responseDTO := TCPMessageDTO{
+	responseDTO := dto.TCPMessageDTO{
 		Type: "broadcast",
 		Name: msgDTO.Name,
 		Text: msgDTO.Text,
@@ -186,7 +173,7 @@ func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
 }
 
 func (t *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
-	var msgDTO TCPMessageDTO
+	var msgDTO dto.TCPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &msgDTO)
 	if err != nil {
 		if sender, ok := t.clientsByName[msg.From]; ok {
@@ -195,7 +182,7 @@ func (t *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
 		return fmt.Errorf("send private message error: %v", err)
 	}
 
-	responseDTO := TCPMessageDTO{
+	responseDTO := dto.TCPMessageDTO{
 		Type: "whisper",
 		Name: msgDTO.Name,
 		Text: msgDTO.Text,
@@ -214,7 +201,14 @@ func (t *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
 	t.mu.RLock()
 	if toConn, ok := t.clientsByName[msgDTO.Dst]; ok {
 		toConn.Write([]byte(message))
+	} else {
+		if fromConn, ok := t.clientsByName[msgDTO.Name]; ok && msgDTO.Dst != msgDTO.Name {
+			t.sendError(fromConn, fmt.Sprintf("%s not found", msgDTO.Dst))
+		}
+		t.mu.RUnlock()
+		return fmt.Errorf("send message error: %v", err)
 	}
+
 	if fromConn, ok := t.clientsByName[msgDTO.Name]; ok && msgDTO.Dst != msgDTO.Name {
 		fromConn.Write([]byte(message))
 	}

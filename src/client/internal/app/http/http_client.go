@@ -86,9 +86,8 @@ func (c *Client) SendMessage() {
 			return
 		}
 
-		// Проверяем, является ли сообщение приватным (whisper)
 		if len(text) > 3 && text[:3] == "/w " {
-			// Формат: /w username message
+
 			parts := bufio.NewScanner(bufio.NewReader(strings.NewReader(text[3:])))
 			parts.Split(bufio.ScanWords)
 			if parts.Scan() {
@@ -105,7 +104,7 @@ func (c *Client) SendMessage() {
 				c.ws.WriteJSON(whisperMsg)
 			}
 		} else {
-			// Обычное публичное сообщение
+
 			broadcastMsg := dto.HTTPMessageDTO{
 				Type: "broadcast",
 				Name: c.username,

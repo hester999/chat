@@ -39,7 +39,6 @@ func JsonToStruct(text string, data *model.OutgoingMessage) error {
 		return err
 	}
 
-	// Конвертируем DTO в бизнес-модель
 	data.Name = dto.Name
 	data.Text = dto.Text
 	data.Time = dto.Time

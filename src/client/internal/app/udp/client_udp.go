@@ -2,12 +2,12 @@ package udp
 
 import (
 	"bufio"
-	"chat/client/internal/model"
-	"chat/client/internal/utils"
+	"chat/client/internal/dto"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -25,7 +25,6 @@ func NewClient(addr *net.UDPAddr) *Client {
 
 func (c *Client) ConnectToChat() {
 	c.registration()
-	fmt.Printf("Enter message: \n")
 
 	go func() {
 		buf := make([]byte, 4096)
@@ -35,41 +34,73 @@ func (c *Client) ConnectToChat() {
 				fmt.Println("Error reading from server:", err)
 				return
 			}
-			msgStruct := model.OutgoingMessage{}
-			err = utils.JsonToStruct(string(buf[:n]), &msgStruct)
-			c.print(msgStruct)
+			msg := strings.TrimSpace(string(buf[:n]))
+			if msg == "" {
+				continue
+			}
+
+			var dtoMsg dto.UDPMessageDTO
+			if err := json.Unmarshal([]byte(msg), &dtoMsg); err == nil && dtoMsg.Type != "" && dtoMsg.Type != "error" {
+				c.Print(dtoMsg)
+				continue
+			}
+
+			var errMsg struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(msg), &errMsg); err == nil && errMsg.Type == "error" {
+				c.Print(dto.UDPMessageDTO{Type: "error", Text: errMsg.Message})
+				continue
+			}
+
+			fmt.Println(msg)
 		}
 	}()
 
 	c.SendMessage()
 }
 
-func (c *Client) print(msg model.OutgoingMessage) {
+func (c *Client) Print(msg dto.UDPMessageDTO) {
 	const (
 		ColorReset   = "\033[0m"
 		ColorGreen   = "\033[32m"
 		ColorBlue    = "\033[34m"
 		ColorMagenta = "\033[35m"
+		ColorRed     = "\033[31m"
 	)
 
-	timeStr := fmt.Sprintf("%s[%s]%s", ColorBlue, msg.Time, ColorReset)
-	nameStr := fmt.Sprintf("%s%s%s", ColorGreen, msg.Name, ColorReset)
-
-	if msg.Private {
-		fmt.Printf("%s[whisper]%s %s %s: %s\n",
-			ColorMagenta, ColorReset,
-			timeStr,
-			nameStr,
-			msg.Text,
-		)
-	} else {
-		fmt.Printf("%s %s: %s\n",
-			timeStr,
-			nameStr,
-			msg.Text,
-		)
+	timeStr := ""
+	if msg.Time != "" {
+		timeStr = fmt.Sprintf("%s[%s]%s ", ColorBlue, msg.Time, ColorReset)
 	}
-	fmt.Printf("Enter message: ")
+	nameStr := ""
+	if msg.Name != "" {
+		nameStr = fmt.Sprintf("%s%s%s", ColorGreen, msg.Name, ColorReset)
+	}
+
+	switch msg.Type {
+	case "whisper":
+		fmt.Println(msg.Type)
+		fmt.Printf("%s%s[whisper]%s %s: %s\n",
+			timeStr,
+			ColorMagenta, ColorReset,
+			nameStr,
+			msg.Text,
+		)
+	case "broadcast":
+
+		fmt.Printf("%s%s: %s\n",
+			timeStr,
+			nameStr,
+			msg.Text,
+		)
+	case "error":
+		fmt.Printf("%s[error]%s %s\n", ColorRed, ColorReset, msg.Text)
+	default:
+		fmt.Println(msg.Text)
+	}
+	fmt.Print("Enter text to send:\n")
 }
 
 func (c *Client) SendMessage() {
@@ -77,14 +108,43 @@ func (c *Client) SendMessage() {
 	for consoleScanner.Scan() {
 		text := consoleScanner.Text()
 
-		msg := model.OutgoingMessage{Name: c.username, Text: text, Time: time.Now().Format("2006/01/02 15:04:05")}
-		msgData := utils.ClientMessageToJsonStr(msg)
-		_, err := c.conn.Write(msgData)
-		if err != nil {
-			fmt.Println("Error sending message:", err)
-			break
+		if text == "/exit" {
+			exitMsg := dto.UDPMessageDTO{
+				Type: "exit",
+				Name: c.username,
+			}
+			data, _ := json.Marshal(exitMsg)
+			c.conn.Write(data)
+			return
 		}
-		fmt.Printf("Enter message: \n")
+
+		if len(text) > 3 && text[:3] == "/w " {
+
+			parts := strings.SplitN(text[3:], " ", 2)
+			if len(parts) == 2 {
+				dst := parts[0]
+				whisperText := parts[1]
+				whisperMsg := dto.UDPMessageDTO{
+					Type: "whisper",
+					Name: c.username,
+					Text: whisperText,
+					Dst:  dst,
+					Time: time.Now().Format("2006/01/02 15:04:05"),
+				}
+				data, _ := json.Marshal(whisperMsg)
+				c.conn.Write(data)
+				continue
+			}
+		}
+
+		broadcastMsg := dto.UDPMessageDTO{
+			Type: "broadcast",
+			Name: c.username,
+			Text: text,
+			Time: time.Now().Format("2006/01/02 15:04:05"),
+		}
+		data, _ := json.Marshal(broadcastMsg)
+		c.conn.Write(data)
 	}
 }
 
@@ -101,11 +161,10 @@ func (c *Client) registration() {
 	}
 	c.conn = conn
 
-	regMsg := struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}{"register", c.username}
-
+	regMsg := dto.UDPMessageDTO{
+		Type: "register",
+		Name: c.username,
+	}
 	regData, _ := json.Marshal(regMsg)
 	c.conn.Write(regData)
 	fmt.Printf("Registered as %s\n", c.username)

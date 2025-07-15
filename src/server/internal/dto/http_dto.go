@@ -1,9 +1,9 @@
 package dto
 
 type HTTPMessageDTO struct {
-	Type string `json:"type"`           // "register", "exit", "broadcast", "whisper"
-	Name string `json:"name"`           // Имя отправителя
-	Text string `json:"text,omitempty"` // Текст сообщения
-	Time string `json:"time,omitempty"` // Время
-	Dst  string `json:"dst,omitempty"`  // Для whisper: имя получателя
+	Type string `json:"type"`
+	Name string `json:"name"`
+	Text string `json:"text,omitempty"`
+	Time string `json:"time,omitempty"`
+	Dst  string `json:"dst,omitempty"`
 }

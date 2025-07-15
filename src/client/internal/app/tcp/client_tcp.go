@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"bufio"
+	"chat/client/internal/dto"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,19 +10,6 @@ import (
 	"strings"
 	"time"
 )
-
-type TCPMessageDTO struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-	Text string `json:"text,omitempty"`
-	Time string `json:"time,omitempty"`
-	Dst  string `json:"dst,omitempty"`
-}
-
-type ErrorDTO struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-}
 
 type Client struct {
 	conn     net.Conn
@@ -51,15 +39,15 @@ func (cl *Client) ConnectToChat() {
 				continue
 			}
 
-			var dtoMsg TCPMessageDTO
+			var dtoMsg dto.TCPMessageDTO
 			if err := json.Unmarshal([]byte(msg), &dtoMsg); err == nil && dtoMsg.Type != "" && dtoMsg.Type != "error" {
-				cl.print(dtoMsg)
+				cl.Print(dtoMsg)
 				continue
 			}
 
-			var errMsg ErrorDTO
+			var errMsg dto.ErrorDTO
 			if err := json.Unmarshal([]byte(msg), &errMsg); err == nil && errMsg.Type == "error" {
-				cl.print(TCPMessageDTO{Type: "error", Text: errMsg.Message})
+				cl.Print(dto.TCPMessageDTO{Type: "error", Text: errMsg.Message})
 				continue
 			}
 
@@ -72,7 +60,7 @@ func (cl *Client) ConnectToChat() {
 	select {}
 }
 
-func (cl *Client) print(msg TCPMessageDTO) {
+func (cl *Client) Print(msg dto.TCPMessageDTO) {
 	const (
 		ColorReset   = "\033[0m"
 		ColorGreen   = "\033[32m"
@@ -109,6 +97,7 @@ func (cl *Client) print(msg TCPMessageDTO) {
 	default:
 		fmt.Println(msg.Text)
 	}
+	fmt.Print("Enter text to send:\n")
 }
 
 func (cl *Client) SendMessage() {
@@ -118,7 +107,7 @@ func (cl *Client) SendMessage() {
 		text := consoleScanner.Text()
 
 		if text == "/exit" {
-			exitMsg := TCPMessageDTO{
+			exitMsg := dto.TCPMessageDTO{
 				Type: "exit",
 				Name: cl.username,
 			}
@@ -133,7 +122,7 @@ func (cl *Client) SendMessage() {
 			if len(parts) == 2 {
 				dst := parts[0]
 				whisperText := parts[1]
-				whisperMsg := TCPMessageDTO{
+				whisperMsg := dto.TCPMessageDTO{
 					Type: "whisper",
 					Name: cl.username,
 					Text: whisperText,
@@ -146,7 +135,7 @@ func (cl *Client) SendMessage() {
 			}
 		}
 
-		broadcastMsg := TCPMessageDTO{
+		broadcastMsg := dto.TCPMessageDTO{
 			Type: "broadcast",
 			Name: cl.username,
 			Text: text,
@@ -163,7 +152,7 @@ func (cl *Client) registration() {
 	scanner.Scan()
 	cl.username = scanner.Text()
 
-	regMsg := TCPMessageDTO{
+	regMsg := dto.TCPMessageDTO{
 		Type: "register",
 		Name: cl.username,
 	}

@@ -1,12 +1,12 @@
 package udp
 
 import (
+	"chat/server/internal/dto"
 	"chat/server/internal/model"
 	"chat/server/utils"
 	"encoding/json"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -18,13 +18,13 @@ type ClientInfo struct {
 }
 
 type Transport struct {
-	clients       map[string]*ClientInfo  // ip:port -> ClientInfo
-	clientsByName map[string]*net.UDPAddr // имя -> адрес
+	clients       map[string]*ClientInfo  
+	clientsByName map[string]*net.UDPAddr 
 	publicChan    chan model.IncomingMessage
 	privateChan   chan model.IncomingMessage
 	quit          chan struct{}
 	conn          *net.UDPConn
-	mu            sync.RWMutex // Мьютекс для защиты доступа к clients и clientsByName
+	mu            sync.RWMutex 
 }
 
 func NewUDPTransport() *Transport {
@@ -96,7 +96,7 @@ func (u *Transport) Start(address string) error {
 
 func (u *Transport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
-	// Обновляем или создаём ClientInfo
+	
 	u.mu.Lock()
 	if client, ok := u.clients[ip]; ok {
 		client.LastSeen = time.Now()
@@ -106,124 +106,101 @@ func (u *Transport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	u.mu.Unlock()
 	strBuf := string(buf)
 
-	var msgDTO struct {
-		Type    string `json:"type,omitempty"`
-		Name    string `json:"name"`
-		Text    string `json:"text,omitempty"`
-		Time    string `json:"time,omitempty"`
-		Private bool   `json:"private,omitempty"`
-	}
-
+	var msgDTO dto.UDPMessageDTO
 	err := utils.JsonToStruct(strBuf, &msgDTO)
 	if err != nil {
-		fmt.Printf("Error parsing JSON: %s\n", err)
+		u.sendError(addr, "invalid json format")
 		return
 	}
 
 	if msgDTO.Type == "register" {
-		if msgDTO.Name != "" {
-			// Проверяем, не занято ли имя другим адресом
-			u.mu.Lock()
-			if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
-				if existingAddr.String() != addr.String() {
-					u.mu.Unlock()
-					fmt.Printf("Name %s already taken by %s\n", msgDTO.Name, existingAddr.String())
-					return
-				}
-			}
-			u.clientsByName[msgDTO.Name] = addr
-			u.clients[ip].Name = msgDTO.Name
-			u.mu.Unlock()
-			fmt.Printf("User %s registered from %s\n", msgDTO.Name, addr.String())
+		if msgDTO.Name == "" {
+			u.sendError(addr, "username cannot be empty")
+			return
 		}
+		u.mu.Lock()
+		if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+			if existingAddr.String() != addr.String() {
+				u.mu.Unlock()
+				u.sendError(addr, "username already taken")
+				return
+			}
+		}
+		u.clientsByName[msgDTO.Name] = addr
+		u.clients[ip].Name = msgDTO.Name
+		u.mu.Unlock()
+		fmt.Printf("User %s registered from %s\n", msgDTO.Name, addr.String())
 		return
 	}
 
-	// Обработка обычных сообщений (только для зарегистрированных пользователей)
 	if msgDTO.Name == "" {
-		fmt.Printf("Message from unregistered user %s\n", addr.String())
+		u.sendError(addr, "message from unregistered user")
 		return
 	}
 
-	// Проверяем, что пользователь зарегистрирован
 	u.mu.RLock()
 	if _, ok := u.clientsByName[msgDTO.Name]; !ok {
 		u.mu.RUnlock()
-		fmt.Printf("User %s not registered\n", msgDTO.Name)
+		u.sendError(addr, "user not registered")
 		return
 	}
-
 	if existingAddr, ok := u.clientsByName[msgDTO.Name]; ok {
 		if existingAddr.String() != addr.String() {
 			u.mu.RUnlock()
-			fmt.Printf("Message from wrong address for user %s\n", msgDTO.Name)
+			u.sendError(addr, "message from wrong address for user")
 			return
 		}
 	}
 	u.mu.RUnlock()
 
 	incomingMsg := model.IncomingMessage{From: msgDTO.Name, Text: strBuf}
-	if strings.HasPrefix(msgDTO.Text, "/w ") {
+	if msgDTO.Type == "whisper" {
 		u.privateChan <- incomingMsg
-	} else if utils.IsExitCommand(msgDTO.Text) {
+	} else if msgDTO.Type == "exit" {
 		ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
 		var username string
 		u.mu.Lock()
 		if client, ok := u.clients[ip]; ok {
 			username = client.Name
 		}
-
 		delete(u.clients, ip)
-
 		if username != "" {
 			delete(u.clientsByName, username)
 		}
 		u.mu.Unlock()
 		fmt.Printf("User %s (%s) disconnected\n", username, ip)
 		return
-	} else {
+	} else if msgDTO.Type == "broadcast" {
 		u.publicChan <- incomingMsg
 	}
 }
 
-func (u *Transport) BroadcastMessage(msg model.IncomingMessage) error {
-
-	var msgDTO struct {
-		Name string `json:"name"`
-		Text string `json:"text"`
-		Time string `json:"time"`
+func (u *Transport) sendError(addr *net.UDPAddr, message string) {
+	errDTO := dto.ErrorDTO{
+		Type:    "error",
+		Message: message,
 	}
+	data, _ := json.Marshal(errDTO)
+	u.conn.WriteTo(data, addr)
+}
 
+func (u *Transport) BroadcastMessage(msg model.IncomingMessage) error {
+	var msgDTO dto.UDPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &msgDTO)
 	if err != nil {
 		return fmt.Errorf("send message error: %v", err)
 	}
 
-	outgoingMsg := model.OutgoingMessage{
-		Name:    msgDTO.Name,
-		Text:    msgDTO.Text,
-		Time:    msgDTO.Time,
-		Private: false,
+	responseDTO := dto.UDPMessageDTO{
+		Type: "broadcast",
+		Name: msgDTO.Name,
+		Text: msgDTO.Text,
+		Time: msgDTO.Time,
 	}
-
-	var responseDTO struct {
-		Name    string `json:"name"`
-		Text    string `json:"text"`
-		Time    string `json:"time"`
-		Private bool   `json:"private,omitempty"`
-	}
-
-	responseDTO.Name = outgoingMsg.Name
-	responseDTO.Text = outgoingMsg.Text
-	responseDTO.Time = outgoingMsg.Time
-	responseDTO.Private = outgoingMsg.Private
-
 	responseJSON, err := json.Marshal(responseDTO)
 	if err != nil {
 		return fmt.Errorf("marshal response error: %v", err)
 	}
-
-	responseJSON = append(responseJSON, '\n')
 
 	u.mu.RLock()
 	for _, client := range u.clients {
@@ -254,71 +231,50 @@ func (u *Transport) Stop() error {
 }
 
 func (u *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
-	// DTO для парсинга входящего сообщения
-	var msgDTO struct {
-		Name string `json:"name"`
-		Text string `json:"text"`
-		Time string `json:"time"`
-	}
-
+	var msgDTO dto.UDPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &msgDTO)
 	if err != nil {
+		if fromAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+			u.sendError(fromAddr, "invalid json format in whisper")
+		}
 		return fmt.Errorf("не удалось распарсить JSON приватного сообщения: %v", err)
 	}
 
-	parts := strings.SplitN(msgDTO.Text, " ", 3)
-	if len(parts) < 3 {
-		return fmt.Errorf("неправильный формат whisper")
+	if msgDTO.Dst == "" {
+		if fromAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+			u.sendError(fromAddr, "destination user not specified")
+		}
+		return fmt.Errorf("destination user not specified")
 	}
 
-	toName := parts[1]
-	whisperText := parts[2]
-
-	// Создаём бизнес-модель
-	privateMsg := model.OutgoingMessage{
-		Name:    msgDTO.Name,
-		Text:    whisperText,
-		Time:    msgDTO.Time,
-		Private: true,
+	u.mu.RLock()
+	toAddr, ok := u.clientsByName[msgDTO.Dst]
+	u.mu.RUnlock()
+	if !ok {
+		if fromAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+			u.sendError(fromAddr, fmt.Sprintf("user %s not found", msgDTO.Dst))
+		}
+		return fmt.Errorf("user %s not found", msgDTO.Dst)
 	}
 
-	// DTO для отправки
-	var responseDTO struct {
-		Name    string `json:"name"`
-		Text    string `json:"text"`
-		Time    string `json:"time"`
-		Private bool   `json:"private,omitempty"`
+	responseDTO := dto.UDPMessageDTO{
+		Type: "whisper",
+		Name: msgDTO.Name,
+		Text: msgDTO.Text,
+		Time: msgDTO.Time,
+		Dst:  msgDTO.Dst,
 	}
-
-	// Конвертируем бизнес-модель в DTO
-	responseDTO.Name = privateMsg.Name
-	responseDTO.Text = privateMsg.Text
-	responseDTO.Time = privateMsg.Time
-	responseDTO.Private = privateMsg.Private
-
-	// Сериализуем
 	responseJSON, err := json.Marshal(responseDTO)
 	if err != nil {
+		if fromAddr, ok := u.clientsByName[msgDTO.Name]; ok {
+			u.sendError(fromAddr, "marshal error in whisper")
+		}
 		return fmt.Errorf("marshal private message error: %v", err)
 	}
 
-	responseJSON = append(responseJSON, '\n')
-
-	u.mu.RLock()
-	for _, v := range u.clients {
-		if v.Name == toName {
-			if _, err = u.conn.WriteTo(responseJSON, v.Addr); err != nil {
-				u.mu.RUnlock()
-				return fmt.Errorf("send message for clients error: %s", err)
-			}
-			break
-		}
+	u.conn.WriteTo(responseJSON, toAddr)
+	if fromAddr, ok := u.clientsByName[msgDTO.Name]; ok && msgDTO.Dst != msgDTO.Name {
+		u.conn.WriteTo(responseJSON, fromAddr)
 	}
-
-	if fromConn, ok := u.clientsByName[msgDTO.Name]; ok {
-		u.conn.WriteTo(responseJSON, fromConn)
-	}
-	u.mu.RUnlock()
-
 	return nil
 }

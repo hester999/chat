@@ -34,8 +34,15 @@ func (s *ChatServer) Start() error {
 	return nil
 }
 
-// Stop завершает работу сервера
 func (s *ChatServer) Stop() error {
 	close(s.quit)
 	return s.transport.Stop()
+}
+
+func (s *ChatServer) BroadcastMessage(msg model.IncomingMessage) error {
+	return s.transport.BroadcastMessage(msg)
+}
+
+func (s *ChatServer) SendPrivateMessage(msg model.IncomingMessage) error {
+	return s.transport.SendPrivateMessage(msg)
 }
