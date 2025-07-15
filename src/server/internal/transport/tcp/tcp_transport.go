@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"chat/server/utils"
-	"strings"
 )
 
 type Transport struct {
@@ -60,6 +59,20 @@ func (t *Transport) Start(address string) error {
 	}
 }
 
+// DTO для TCP (аналогично HTTP)
+type TCPMessageDTO struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+	Text string `json:"text,omitempty"`
+	Time string `json:"time,omitempty"`
+	Dst  string `json:"dst,omitempty"`
+}
+
+type ErrorDTO struct {
+	Type    string `json:"type"` // всегда "error"
+	Message string `json:"message"`
+}
+
 func (t *Transport) handleRequest(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
@@ -70,40 +83,37 @@ func (t *Transport) handleRequest(conn net.Conn) {
 	scanner := bufio.NewScanner(conn)
 	var username string
 
-	// Читаем все сообщения
 	for scanner.Scan() {
 		clientMessage := scanner.Text()
 
-		// DTO для парсинга входящих сообщений
-		var msgDTO struct {
-			Type    string `json:"type,omitempty"`
-			Name    string `json:"name"`
-			Text    string `json:"text,omitempty"`
-			Time    string `json:"time,omitempty"`
-			Private bool   `json:"private,omitempty"`
-		}
-
+		var msgDTO TCPMessageDTO
 		err := utils.JsonToStruct(clientMessage, &msgDTO)
 		if err != nil {
-			continue // пропускаем невалидный JSON
-		}
-
-		// Обработка регистрации
-		if msgDTO.Type == "register" {
-			if msgDTO.Name != "" && username == "" {
-				username = msgDTO.Name
-				t.mu.Lock()
-				t.clientsByName[username] = conn
-				t.mu.Unlock()
-				fmt.Printf("User %s registered from %s\n", username, addr)
-			}
+			t.sendError(conn, "invalid json format")
 			continue
 		}
 
-		incomingMsg := model.IncomingMessage{From: msgDTO.Name, Text: clientMessage}
-		if strings.HasPrefix(msgDTO.Text, "/w ") {
-			t.privateChan <- incomingMsg
-		} else if utils.IsExitCommand(msgDTO.Text) {
+		if msgDTO.Type == "register" {
+			if msgDTO.Name == "" {
+				t.sendError(conn, "username cannot be empty")
+				continue
+			}
+			t.mu.Lock()
+			if _, exists := t.clientsByName[msgDTO.Name]; exists {
+				t.mu.Unlock()
+				t.sendError(conn, "username already taken")
+				return
+			}
+			if username == "" {
+				username = msgDTO.Name
+				t.clientsByName[username] = conn
+				fmt.Printf("User %s registered from %s\n", username, addr)
+			}
+			t.mu.Unlock()
+			continue
+		}
+
+		if msgDTO.Type == "exit" {
 			t.mu.Lock()
 			delete(t.clients, addr)
 			if username != "" {
@@ -111,7 +121,12 @@ func (t *Transport) handleRequest(conn net.Conn) {
 			}
 			t.mu.Unlock()
 			return
-		} else {
+		}
+
+		incomingMsg := model.IncomingMessage{From: msgDTO.Name, Text: clientMessage}
+		if msgDTO.Type == "whisper" {
+			t.privateChan <- incomingMsg
+		} else if msgDTO.Type == "broadcast" {
 			t.publicChan <- incomingMsg
 		}
 	}
@@ -124,43 +139,36 @@ func (t *Transport) handleRequest(conn net.Conn) {
 	t.mu.Unlock()
 }
 
-func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
-	// DTO для парсинга входящего сообщения
-	var msgDTO struct {
-		Name string `json:"name"`
-		Text string `json:"text"`
-		Time string `json:"time"`
+func (t *Transport) sendError(conn net.Conn, message string) {
+	errDTO := ErrorDTO{
+		Type:    "error",
+		Message: message,
 	}
+	data, _ := json.Marshal(errDTO)
+	conn.Write(append(data, '\n'))
+}
 
+func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
+	var msgDTO TCPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &msgDTO)
 	if err != nil {
+		if sender, ok := t.clientsByName[msg.From]; ok {
+			t.sendError(sender, "invalid json format in broadcast")
+		}
 		return fmt.Errorf("send message error: %v", err)
 	}
 
-	// Создаём бизнес-модель
-	outgoingMsg := model.OutgoingMessage{
-		Name:    msgDTO.Name,
-		Text:    msgDTO.Text,
-		Time:    msgDTO.Time,
-		Private: false,
+	responseDTO := TCPMessageDTO{
+		Type: "broadcast",
+		Name: msgDTO.Name,
+		Text: msgDTO.Text,
+		Time: msgDTO.Time,
 	}
-
-	// DTO для отправки
-	var responseDTO struct {
-		Name    string `json:"name"`
-		Text    string `json:"text"`
-		Time    string `json:"time"`
-		Private bool   `json:"private,omitempty"`
-	}
-
-	// Конвертируем бизнес-модель в DTO
-	responseDTO.Name = outgoingMsg.Name
-	responseDTO.Text = outgoingMsg.Text
-	responseDTO.Time = outgoingMsg.Time
-	responseDTO.Private = outgoingMsg.Private
-
 	responseJSON, err := json.Marshal(responseDTO)
 	if err != nil {
+		if sender, ok := t.clientsByName[msg.From]; ok {
+			t.sendError(sender, "marshal error in broadcast")
+		}
 		return fmt.Errorf("marshal response error: %v", err)
 	}
 
@@ -169,7 +177,8 @@ func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
 	for _, client := range t.clientsByName {
 		_, err = client.Write([]byte(message))
 		if err != nil {
-			return fmt.Errorf("send message for client error: %s", err)
+			// Не отправляем ошибку всем, только логируем
+			fmt.Printf("send message for client error: %s\n", err)
 		}
 	}
 	t.mu.RUnlock()
@@ -177,70 +186,39 @@ func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
 }
 
 func (t *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
-
-	var msgDTO struct {
-		Name string `json:"name"`
-		Text string `json:"text"`
-		Time string `json:"time"`
-	}
-
+	var msgDTO TCPMessageDTO
 	err := utils.JsonToStruct(msg.Text, &msgDTO)
 	if err != nil {
-		return fmt.Errorf("error comvert json: %v", err)
+		if sender, ok := t.clientsByName[msg.From]; ok {
+			t.sendError(sender, "invalid json format in whisper")
+		}
+		return fmt.Errorf("send private message error: %v", err)
 	}
 
-	parts := strings.SplitN(msgDTO.Text, " ", 3)
-	if len(parts) < 3 {
-		return fmt.Errorf("invalid whisper")
+	responseDTO := TCPMessageDTO{
+		Type: "whisper",
+		Name: msgDTO.Name,
+		Text: msgDTO.Text,
+		Time: msgDTO.Time,
+		Dst:  msgDTO.Dst,
 	}
-
-	toName := parts[1]
-	whisperText := parts[2]
-
-	// Создаём бизнес-модель
-	privateMsg := model.OutgoingMessage{
-		Name:    msgDTO.Name,
-		Text:    whisperText,
-		Time:    msgDTO.Time,
-		Private: true,
-	}
-
-	// DTO для отправки
-	var responseDTO struct {
-		Name    string `json:"name"`
-		Text    string `json:"text"`
-		Time    string `json:"time"`
-		Private bool   `json:"private,omitempty"`
-	}
-
-	// Конвертируем бизнес-модель в DTO
-	responseDTO.Name = privateMsg.Name
-	responseDTO.Text = privateMsg.Text
-	responseDTO.Time = privateMsg.Time
-	responseDTO.Private = privateMsg.Private
-
-	// Сериализуем
 	responseJSON, err := json.Marshal(responseDTO)
 	if err != nil {
-		return fmt.Errorf("marshal private message error: %v", err)
+		if sender, ok := t.clientsByName[msg.From]; ok {
+			t.sendError(sender, "marshal error in whisper")
+		}
+		return fmt.Errorf("marshal response error: %v", err)
 	}
 
 	message := string(responseJSON) + "\n"
-
-	// Отправляем получателю
 	t.mu.RLock()
-	if toConn, ok := t.clientsByName[toName]; ok {
+	if toConn, ok := t.clientsByName[msgDTO.Dst]; ok {
 		toConn.Write([]byte(message))
 	}
-	t.mu.RUnlock()
-
-	// Отправляем отправителю (подтверждение)
-	t.mu.RLock()
-	if fromConn, ok := t.clientsByName[msgDTO.Name]; ok {
+	if fromConn, ok := t.clientsByName[msgDTO.Name]; ok && msgDTO.Dst != msgDTO.Name {
 		fromConn.Write([]byte(message))
 	}
 	t.mu.RUnlock()
-
 	return nil
 }
 
