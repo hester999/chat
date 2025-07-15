@@ -6,9 +6,9 @@ import (
 )
 
 func main() {
-	appInstance, err := cfg.Setup()
+	clientInstance, err := cfg.Setup()
 	if err != nil {
 		log.Fatal("Setup error:", err)
 	}
-	appInstance.ConnectToChat()
+	clientInstance.ConnectToChat()
 }

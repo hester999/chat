@@ -1,15 +1,13 @@
 package http
 
 import (
+	"chat/server/internal/dto"
 	"chat/server/internal/model"
 	"chat/server/utils"
-	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
-	_ "github.com/gorilla/websocket"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 )
 
@@ -17,7 +15,7 @@ type RawMessage struct {
 	Conn *websocket.Conn
 	Data []byte
 }
-type HTTPTransport struct {
+type Transport struct {
 	clients       map[*websocket.Conn]bool
 	clientsByName map[string]*websocket.Conn
 	publicChan    chan model.IncomingMessage
@@ -33,8 +31,8 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-func NewHTTPTransport() *HTTPTransport {
-	return &HTTPTransport{
+func NewHTTPTransport() *Transport {
+	return &Transport{
 		clients:       make(map[*websocket.Conn]bool),
 		clientsByName: make(map[string]*websocket.Conn),
 		publicChan:    make(chan model.IncomingMessage, 100),
@@ -44,8 +42,7 @@ func NewHTTPTransport() *HTTPTransport {
 	}
 }
 
-func (h *HTTPTransport) Start() error {
-
+func (h *Transport) Start(addres string) error {
 	go func() {
 		for {
 			select {
@@ -60,42 +57,41 @@ func (h *HTTPTransport) Start() error {
 	}()
 
 	http.HandleFunc("/ws", h.handleConnections)
-	return http.ListenAndServe(":8000", nil)
-}
-func (h *HTTPTransport) Stop() error {
-
-}
-func (h *HTTPTransport) BroadcastMessage(msg model.IncomingMessage) error {
-
-	var msgDTO struct {
-		Name string `json:"name"`
-		Text string `json:"text"`
-		Time string `json:"time"`
+	log.Println("http server started on ", addres)
+	err := http.ListenAndServe(addres, nil)
+	if err != nil {
+		log.Fatal("ListenAndServe: ", err)
 	}
+	return nil
+}
 
-	err := utils.JsonToStruct(msg.Text, &msgDTO)
+func (h *Transport) Stop() error {
+	close(h.quit)
+	return nil
+}
+
+func (h *Transport) BroadcastMessage(msg model.IncomingMessage) error {
+	// msg.Text содержит сериализованный JSON DTO
+	var dtoMsg dto.HTTPMessageDTO
+	err := utils.JsonToStruct(msg.Text, &dtoMsg)
 	if err != nil {
 		return fmt.Errorf("send message error: %v", err)
 	}
 
-	outgoingMsg := model.OutgoingMessage{
-		Name:    msgDTO.Name,
-		Text:    msgDTO.Text,
-		Time:    msgDTO.Time,
-		Private: false,
+	// Преобразуем DTO в бизнес-модель
+	outgoingMsg := model.HTTPMessage{
+		Name: dtoMsg.Name,
+		Text: dtoMsg.Text,
+		Time: dtoMsg.Time,
 	}
 
-	var responseDTO struct {
-		Name    string `json:"name"`
-		Text    string `json:"text"`
-		Time    string `json:"time"`
-		Private bool   `json:"private,omitempty"`
+	// Преобразуем бизнес-модель обратно в DTO для отправки
+	responseDTO := dto.HTTPMessageDTO{
+		Name: outgoingMsg.Name,
+		Text: outgoingMsg.Text,
+		Time: outgoingMsg.Time,
+		Type: "broadcast",
 	}
-
-	responseDTO.Name = outgoingMsg.Name
-	responseDTO.Text = outgoingMsg.Text
-	responseDTO.Time = outgoingMsg.Time
-	responseDTO.Private = outgoingMsg.Private
 
 	h.mu.RLock()
 	for _, client := range h.clientsByName {
@@ -108,11 +104,40 @@ func (h *HTTPTransport) BroadcastMessage(msg model.IncomingMessage) error {
 	return nil
 }
 
-func (h *HTTPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
+func (h *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
+	var dtoMsg dto.HTTPMessageDTO
+	err := utils.JsonToStruct(msg.Text, &dtoMsg)
+	if err != nil {
+		return fmt.Errorf("send private message error: %v", err)
+	}
 
+	privateMsg := model.HTTPMessage{
+		Name: dtoMsg.Name,
+		Text: dtoMsg.Text,
+		Time: dtoMsg.Time,
+		// Private: true, // больше не используется
+	}
+
+	responseDTO := dto.HTTPMessageDTO{
+		Name: privateMsg.Name,
+		Text: privateMsg.Text,
+		Time: privateMsg.Time,
+		Type: "whisper",
+		Dst:  dtoMsg.Dst,
+	}
+
+	h.mu.RLock()
+	if toConn, ok := h.clientsByName[dtoMsg.Dst]; ok {
+		toConn.WriteJSON(responseDTO)
+	}
+	if fromConn, ok := h.clientsByName[dtoMsg.Name]; ok && dtoMsg.Dst != dtoMsg.Name {
+		fromConn.WriteJSON(responseDTO)
+	}
+	h.mu.RUnlock()
+	return nil
 }
 
-func (h *HTTPTransport) handleConnections(w http.ResponseWriter, r *http.Request) {
+func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -126,54 +151,24 @@ func (h *HTTPTransport) handleConnections(w http.ResponseWriter, r *http.Request
 	var username string
 
 	for {
-		messageType, message, err := ws.ReadMessage()
-		if err != nil {
-			log.Println(err)
+		var msg dto.HTTPMessageDTO
+		if err := ws.ReadJSON(&msg); err != nil {
+			log.Println("ReadJSON error:", err)
 			break
 		}
-		if messageType != websocket.TextMessage {
-			continue
-		}
 
-		var msgDTO struct {
-			Type    string `json:"type,omitempty"`
-			Name    string `json:"name"`
-			Text    string `json:"text,omitempty"`
-			Time    string `json:"time,omitempty"`
-			Private bool   `json:"private,omitempty"`
-		}
-
-		if err := utils.JsonToStruct(string(message), &msgDTO); err != nil {
-			log.Println("JSON decode error:", err)
-			continue
-		}
-
-		if msgDTO.Type == "register" && username == "" {
-			username = msgDTO.Name
-			h.mu.Lock()
-			if _, ok := h.clients[ws]; ok {
-				h.mu.Unlock()
-				continue
-			}
-			h.clientsByName[username] = ws
-			h.mu.Unlock()
-			fmt.Printf("User %s registered from %s\n", username, ws.RemoteAddr())
-			continue
-		}
-
-		incoming := model.IncomingMessage{From: msgDTO.Name, Text: string(message)}
-		if strings.HasPrefix(msgDTO.Text, "/w ") {
-			h.privateChan <- incoming
-		} else if utils.IsExitCommand(msgDTO.Text) {
-			h.mu.Lock()
-			delete(h.clients, ws)
-			if username != "" {
-				delete(h.clientsByName, username)
-			}
-			h.mu.Unlock()
+		switch msg.Type {
+		case "register":
+			fmt.Println(123)
+			h.handleRegister(ws, &username, msg)
+		case "exit":
+			h.handleExit(ws, username)
 			return
-		} else {
-			h.publicChan <- incoming
+		case "whisper":
+			h.handleWhisper(msg)
+		case "broadcast":
+			fmt.Println(123)
+			h.handleBroadcast(msg)
 		}
 	}
 
@@ -183,4 +178,46 @@ func (h *HTTPTransport) handleConnections(w http.ResponseWriter, r *http.Request
 		delete(h.clientsByName, username)
 	}
 	h.mu.Unlock()
+}
+
+func (h *Transport) handleRegister(ws *websocket.Conn, username *string, msg dto.HTTPMessageDTO) {
+	*username = msg.Name
+	h.mu.Lock()
+	//if _, ok := h.clients[ws]; ok {
+	//	h.mu.Unlock()
+	//	return
+	//}
+	h.clientsByName[*username] = ws
+	h.mu.Unlock()
+	fmt.Printf("User %s registered from %s\n", *username, ws.RemoteAddr())
+}
+
+func (h *Transport) handleExit(ws *websocket.Conn, username string) {
+	h.mu.Lock()
+	delete(h.clients, ws)
+	if username != "" {
+		delete(h.clientsByName, username)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Transport) handleBroadcast(msg dto.HTTPMessageDTO) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, client := range h.clientsByName {
+
+		client.WriteJSON(msg)
+	}
+}
+
+func (h *Transport) handleWhisper(msg dto.HTTPMessageDTO) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if toConn, ok := h.clientsByName[msg.Dst]; ok {
+		toConn.WriteJSON(msg)
+	}
+	if fromConn, ok := h.clientsByName[msg.Name]; ok && msg.Dst != msg.Name {
+		fromConn.WriteJSON(msg)
+	}
 }

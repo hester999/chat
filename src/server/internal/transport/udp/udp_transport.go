@@ -17,7 +17,7 @@ type ClientInfo struct {
 	LastSeen time.Time
 }
 
-type UDPTransport struct {
+type Transport struct {
 	clients       map[string]*ClientInfo  // ip:port -> ClientInfo
 	clientsByName map[string]*net.UDPAddr // имя -> адрес
 	publicChan    chan model.IncomingMessage
@@ -27,8 +27,8 @@ type UDPTransport struct {
 	mu            sync.RWMutex // Мьютекс для защиты доступа к clients и clientsByName
 }
 
-func NewUDPTransport() *UDPTransport {
-	return &UDPTransport{
+func NewUDPTransport() *Transport {
+	return &Transport{
 		clients:       make(map[string]*ClientInfo),
 		clientsByName: make(map[string]*net.UDPAddr),
 		publicChan:    make(chan model.IncomingMessage, 100),
@@ -38,7 +38,7 @@ func NewUDPTransport() *UDPTransport {
 }
 
 // Очистка неактивных клиентов
-func (u *UDPTransport) cleanupInactiveClients(timeout time.Duration) {
+func (u *Transport) cleanupInactiveClients(timeout time.Duration) {
 	ticker := time.NewTicker(120 * time.Second)
 	for {
 		select {
@@ -62,13 +62,13 @@ func (u *UDPTransport) cleanupInactiveClients(timeout time.Duration) {
 	}
 }
 
-func (u *UDPTransport) Start() error {
-	addr, _ := net.ResolveUDPAddr("udp", ":4545")
+func (u *Transport) Start(address string) error {
+	addr, _ := net.ResolveUDPAddr("udp", address)
 	conn, _ := net.ListenUDP("udp", addr)
 	u.conn = conn
 	defer conn.Close()
 
-	go u.cleanupInactiveClients(60 * time.Second)
+	go u.cleanupInactiveClients(120 * time.Second)
 
 	go func() {
 		for {
@@ -94,7 +94,7 @@ func (u *UDPTransport) Start() error {
 	}
 }
 
-func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
+func (u *Transport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	ip := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
 	// Обновляем или создаём ClientInfo
 	u.mu.Lock()
@@ -186,7 +186,7 @@ func (u *UDPTransport) handleRequest(buf []byte, addr *net.UDPAddr) {
 	}
 }
 
-func (u *UDPTransport) BroadcastMessage(msg model.IncomingMessage) error {
+func (u *Transport) BroadcastMessage(msg model.IncomingMessage) error {
 
 	var msgDTO struct {
 		Name string `json:"name"`
@@ -236,7 +236,7 @@ func (u *UDPTransport) BroadcastMessage(msg model.IncomingMessage) error {
 	return nil
 }
 
-func (u *UDPTransport) Stop() error {
+func (u *Transport) Stop() error {
 	close(u.quit)
 	u.mu.Lock()
 	for ip, client := range u.clients {
@@ -253,7 +253,7 @@ func (u *UDPTransport) Stop() error {
 	return nil
 }
 
-func (u *UDPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
+func (u *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
 	// DTO для парсинга входящего сообщения
 	var msgDTO struct {
 		Name string `json:"name"`

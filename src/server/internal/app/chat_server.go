@@ -5,26 +5,28 @@ import (
 )
 
 type Transport interface {
-	Start() error
+	Start(address string) error
 	Stop() error
 	BroadcastMessage(msg model.IncomingMessage) error
 	SendPrivateMessage(msg model.IncomingMessage) error
 }
 
 type ChatServer struct {
-	transport Transport
-	quit      chan struct{}
+	transport  Transport
+	quit       chan struct{}
+	serverAddr string
 }
 
-func NewChatServer(tr Transport) *ChatServer {
+func NewChatServer(tr Transport, addr string) *ChatServer {
 	return &ChatServer{
-		transport: tr,
-		quit:      make(chan struct{}),
+		transport:  tr,
+		quit:       make(chan struct{}),
+		serverAddr: addr,
 	}
 }
 
 func (s *ChatServer) Start() error {
-	err := s.transport.Start()
+	err := s.transport.Start(s.serverAddr)
 	if err != nil {
 		return err
 	}

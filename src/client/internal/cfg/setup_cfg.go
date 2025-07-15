@@ -2,10 +2,13 @@ package cfg
 
 import (
 	"chat/client/internal/app"
+	"chat/client/internal/app/http"
 	"chat/client/internal/app/tcp"
 	"chat/client/internal/app/udp"
 	"fmt"
 	"net"
+
+	"github.com/gorilla/websocket"
 )
 
 func Setup() (*app.App, error) {
@@ -19,10 +22,8 @@ func Setup() (*app.App, error) {
 	case "udp":
 		return setupUDP(address)
 
-	//case "http":
-	//	// на будущее: реализуй http.NewClient(address), реализующий app.Client
-	//	client := http.NewClient(address)
-	//	return app.NewApp(client), nil
+	case "http":
+		return setupHTTP(address)
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol type: %s (expected: tcp, udp, http)", flags.ProtoType)
@@ -46,5 +47,17 @@ func setupUDP(address string) (*app.App, error) {
 		return nil, err
 	}
 	client := udp.NewClient(addr)
+	return app.NewApp(client), nil
+}
+
+func setupHTTP(address string) (*app.App, error) {
+	
+	wsURL := fmt.Sprintf("ws://%s/ws", address)
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		fmt.Println("Error connecting (HTTP/WebSocket):", err.Error())
+		return nil, err
+	}
+	client := http.NewClient(ws)
 	return app.NewApp(client), nil
 }

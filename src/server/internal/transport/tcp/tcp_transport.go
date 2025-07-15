@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-type TCPTransport struct {
+type Transport struct {
 	clients       map[string]net.Conn
 	clientsByName map[string]net.Conn // Имя -> соединение
 	publicChan    chan model.IncomingMessage
@@ -21,8 +21,8 @@ type TCPTransport struct {
 	mu            sync.RWMutex
 }
 
-func NewTCPTransport() *TCPTransport {
-	return &TCPTransport{
+func NewTCPTransport() *Transport {
+	return &Transport{
 		clients:       make(map[string]net.Conn),
 		clientsByName: make(map[string]net.Conn),
 		publicChan:    make(chan model.IncomingMessage, 100),
@@ -31,8 +31,8 @@ func NewTCPTransport() *TCPTransport {
 	}
 }
 
-func (t *TCPTransport) Start() error {
-	listener, err := net.Listen("tcp", "localhost:4545")
+func (t *Transport) Start(address string) error {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
@@ -60,7 +60,7 @@ func (t *TCPTransport) Start() error {
 	}
 }
 
-func (t *TCPTransport) handleRequest(conn net.Conn) {
+func (t *Transport) handleRequest(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
 	t.mu.Lock()
@@ -124,7 +124,7 @@ func (t *TCPTransport) handleRequest(conn net.Conn) {
 	t.mu.Unlock()
 }
 
-func (t *TCPTransport) BroadcastMessage(msg model.IncomingMessage) error {
+func (t *Transport) BroadcastMessage(msg model.IncomingMessage) error {
 	// DTO для парсинга входящего сообщения
 	var msgDTO struct {
 		Name string `json:"name"`
@@ -176,7 +176,7 @@ func (t *TCPTransport) BroadcastMessage(msg model.IncomingMessage) error {
 	return nil
 }
 
-func (t *TCPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
+func (t *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
 
 	var msgDTO struct {
 		Name string `json:"name"`
@@ -244,7 +244,7 @@ func (t *TCPTransport) SendPrivateMessage(msg model.IncomingMessage) error {
 	return nil
 }
 
-func (t *TCPTransport) Stop() error {
+func (t *Transport) Stop() error {
 	close(t.quit)
 	t.mu.Lock()
 	for addr, conn := range t.clients {
