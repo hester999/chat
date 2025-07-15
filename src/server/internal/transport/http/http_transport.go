@@ -4,6 +4,7 @@ import (
 	"chat/server/internal/dto"
 	"chat/server/internal/model"
 	"chat/server/utils"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,9 +20,6 @@ type RawMessage struct {
 type Transport struct {
 	clients       map[*websocket.Conn]bool
 	clientsByName map[string]*websocket.Conn
-	publicChan    chan model.IncomingMessage
-	privateChan   chan model.IncomingMessage
-	messageChan   chan RawMessage
 	quit          chan struct{}
 	mu            sync.RWMutex
 }
@@ -36,27 +34,11 @@ func NewHTTPTransport() *Transport {
 	return &Transport{
 		clients:       make(map[*websocket.Conn]bool),
 		clientsByName: make(map[string]*websocket.Conn),
-		publicChan:    make(chan model.IncomingMessage, 100),
-		privateChan:   make(chan model.IncomingMessage, 100),
-		messageChan:   make(chan RawMessage, 100),
 		quit:          make(chan struct{}),
 	}
 }
 
 func (h *Transport) Start(address string) error {
-	go func() {
-		for {
-			select {
-			case msg := <-h.publicChan:
-				h.BroadcastMessage(msg)
-			case msg := <-h.privateChan:
-				h.SendPrivateMessage(msg)
-			case <-h.quit:
-				return
-			}
-		}
-	}()
-
 	http.HandleFunc("/ws", h.handleConnections)
 	log.Println("http server started on ", address)
 	err := http.ListenAndServe(address, nil)
@@ -127,6 +109,16 @@ func (h *Transport) SendPrivateMessage(msg model.IncomingMessage) error {
 	h.mu.RLock()
 	if toConn, ok := h.clientsByName[dtoMsg.Dst]; ok {
 		toConn.WriteJSON(responseDTO)
+	} else {
+		if fromConn, ok := h.clientsByName[dtoMsg.Name]; ok {
+			errMsg := dto.HTTPMessageDTO{
+				Type: "error",
+				Text: fmt.Sprintf("%s is not existed", dtoMsg.Dst),
+			}
+			fromConn.WriteJSON(errMsg)
+			h.mu.RUnlock()
+			return nil
+		}
 	}
 	if fromConn, ok := h.clientsByName[dtoMsg.Name]; ok && dtoMsg.Dst != dtoMsg.Name {
 		fromConn.WriteJSON(responseDTO)
@@ -155,6 +147,16 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		msgJson, err := json.Marshal(msg)
+		if err != nil {
+			log.Println("Marshal error:", err)
+			continue
+		}
+		incoming := model.IncomingMessage{
+			From: msg.Name,
+			Text: string(msgJson),
+		}
+
 		switch msg.Type {
 		case "register":
 			h.handleRegister(ws, &username, msg)
@@ -162,9 +164,9 @@ func (h *Transport) handleConnections(w http.ResponseWriter, r *http.Request) {
 			h.handleExit(ws, username)
 			return
 		case "whisper":
-			h.handleWhisper(msg)
+			h.SendPrivateMessage(incoming)
 		case "broadcast":
-			h.handleBroadcast(msg)
+			h.BroadcastMessage(incoming)
 		}
 	}
 
@@ -205,40 +207,4 @@ func (h *Transport) handleExit(ws *websocket.Conn, username string) {
 
 	}
 	h.mu.Unlock()
-}
-
-func (h *Transport) handleBroadcast(msg dto.HTTPMessageDTO) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	for _, client := range h.clientsByName {
-
-		client.WriteJSON(msg)
-	}
-}
-
-func (h *Transport) handleWhisper(msg dto.HTTPMessageDTO) {
-	h.mu.RLock()
-	toConn, ok := h.clientsByName[msg.Dst]
-	h.mu.RUnlock()
-	if !ok {
-		h.mu.RLock()
-		if fromConn, ok := h.clientsByName[msg.Name]; ok {
-			err := dto.ErrorDTO{
-				Type:    "error",
-				Message: "user not found",
-			}
-			fromConn.WriteJSON(err)
-		}
-		h.mu.RUnlock()
-		return
-	}
-	h.mu.RLock()
-	if toConn != nil {
-		toConn.WriteJSON(msg)
-	}
-	if fromConn, ok := h.clientsByName[msg.Name]; ok && msg.Dst != msg.Name {
-		fromConn.WriteJSON(msg)
-	}
-	h.mu.RUnlock()
 }

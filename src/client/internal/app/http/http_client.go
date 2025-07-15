@@ -43,7 +43,6 @@ func (c *Client) ConnectToChat() {
 }
 
 func (c *Client) print(msg dto.HTTPMessageDTO) {
-	fmt.Println(msg)
 	const (
 		ColorReset   = "\033[0m"
 		ColorGreen   = "\033[32m"
